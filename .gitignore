@@ -1,0 +1,7 @@
+node_modules/
+.wrangler/
+dist/
+test/.e2e/
+test/.load/
+test/__pycache__/
+.dev.vars

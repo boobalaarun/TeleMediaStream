@@ -1,0 +1,26 @@
+# TeleMediaStream: streams an app's Telegram files through Cloudflare, on the Workers Free
+# plan. Your settings live in the Cloudflare dashboard, not in this file:
+#   Workers & Pages -> telemediastream -> Settings -> Variables and Secrets
+#     APP_URL        the app's address, e.g. https://stream.example.com
+#     SHARED_SECRET  the app's Cloudflare secret, or the one its owner gave you
+# Optional settings and the full guide are in README.md.
+name = "telemediastream"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+minify = true
+# Keep variables added in the dashboard (APP_URL, SEGMENT_MB, ...) when a GitHub push redeploys.
+# Secrets are always kept.
+keep_vars = true
+
+# SQLite-backed Durable Objects (allowed on the Workers Free plan) do the Telegram work.
+[[durable_objects.bindings]]
+name = "CORE"
+class_name = "TeleCore"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TeleCore"]
+
+[observability]
+enabled = true
