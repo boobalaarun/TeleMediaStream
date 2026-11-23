@@ -2,7 +2,7 @@
 // fake multi-DC Telegram (Node), fake app (Python, with the app's real signature code).
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, createHmac } from 'node:crypto'
 import { initTestCrypto, assert } from './shims.mjs'
 import { World, fileBytes } from './fake-telegram.mjs'
 import * as B from '../src/mtproto/bytes.js'
@@ -249,7 +249,50 @@ try {
     ok(`a user's own bot streams through their own Durable Object (${Date.now() - t} ms); status, sync and reports stay apart`)
   }
 
-  // 10. app down: streaming continues with the last known settings
+  // 10. the dashboard: /admin page, API calls signed with a secret, each secret sees its own bots
+  {
+    const signed = (secret, method, path) => {
+      const ts = String(Math.floor(Date.now() / 1000))
+      const sig = createHmac('sha256', secret).update(`${ts}\n${method} ${path}\n`).digest('hex')
+      return fetch(W + path, { method, headers: { 'x-admin-time': ts, 'x-admin-sig': sig } })
+    }
+    const home = await fetch(W + '/', { headers: { accept: 'text/html' }, redirect: 'manual' })
+    assert(home.status === 302 && new URL(home.headers.get('location'), W).pathname === '/admin', 'a browser opening / goes to /admin')
+    assert((await (await fetch(W + '/')).text()).includes('OK (serves 127.0.0.1:' + APP_PORT), 'scripts still get the text line')
+    const pg = await fetch(W + '/admin')
+    const html = await pg.text()
+    const nonce = ((pg.headers.get('content-security-policy') || '').match(/'nonce-([0-9a-f]+)'/) || [])[1]
+    assert(pg.status === 200 && nonce && html.includes(`<script nonce="${nonce}">`) && html.includes('data-host="127.0.0.1:' + APP_PORT + '"') &&
+      !html.includes('{{') && pg.headers.get('x-frame-options') === 'DENY', 'page carries its CSP nonce and the app host')
+    assert((await fetch(W + '/admin/api/state')).status === 401, 'unsigned -> 401')
+    assert((await signed('not-the-secret', 'GET', '/admin/api/state')).status === 401, 'wrong secret -> 401')
+    assert((await signed(SECRET, 'GET', '/admin/api/other')).status === 404, 'unknown call -> 404')
+
+    const ac = new AbortController()
+    const playing = await fetch(fileLink(12), { signal: ac.signal })
+    const reader = playing.body.getReader()
+    await reader.read()
+    const st = await (await signed(SECRET, 'GET', '/admin/api/state')).json()
+    ac.abort()
+    const names = st.clients.map((c) => c.name)
+    assert(st.all && JSON.stringify(names) === '["main","alice"]', 'SHARED_SECRET sees every bot: ' + names)
+    const me = st.clients[0]
+    assert(me.config === 'ok' && me.bot && me.bot.dc === 4 && me.syncedAgo >= 0 && me.today > 0, 'your bot: ' + JSON.stringify({ ...me, hours: 0 }))
+    assert(me.streams.some((x) => x.name.includes('Pattiyal') && x.bytes > 0 && x.dc === world.fileDc), 'what is playing, with its name and DC: ' + JSON.stringify(me.streams))
+    assert(st.hours.length === 24 && st.hours.slice(22).some((n) => n > 0) && st.today === me.today + st.clients[1].today, 'bytes per hour add up')
+
+    const u = await (await signed(SECRET_ALICE, 'GET', '/admin/api/state')).json()
+    assert(!u.all && u.clients.length === 1 && u.clients[0].name === 'alice' && u.clients[0].bot.dc === 2, "a user's secret sees only their bot")
+    const before = (await (await fetch(APP + '/_reports')).json()).config_calls_by
+    const sy = await (await signed(SECRET, 'POST', '/admin/api/sync')).json()
+    const after = (await (await fetch(APP + '/_reports')).json()).config_calls_by
+    assert(sy.ok && after.main === before.main + 1 && after.alice === before.alice + 1, 'Sync settings now reloads every bot ' + JSON.stringify([before, after]))
+    const t = await (await signed(SECRET, 'POST', '/admin/api/selftest')).json()
+    assert(t.ok && (t.cached || t.decryptedMB === 128), 'Run self-test ' + JSON.stringify(t))
+    ok('dashboard: /admin page with a CSP nonce; signed calls scoped by secret; what is playing, bytes per hour, sync, self-test')
+  }
+
+  // 11. app down: streaming continues with the last known settings
   {
     children[0].kill()
     await sleep(500)

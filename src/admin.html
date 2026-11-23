@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="dark light">
+<title>TeleMediaStream</title>
+<style nonce="{{NONCE}}">
+/* VOICE: a quiet control room. IDEA: a broadcast monitor: what is on air first, then the day's meter.
+   PICTURE: the live line and the 24-hour bar meter. COLOUR: near-black ground, one cool accent for
+   data, green for live, amber for stalls, red for problems. TYPE: condensed system face for headings
+   and figures, system UI for text. LAYOUT: one calm column, 720px at most. */
+:root{--bg:#0e1114;--panel:#161b21;--line:#27303a;--ink:#e9eef3;--mute:#8d99a6;--accent:#6cb6ff;--live:#3ddc84;--warn:#f0b429;--bad:#ff6b6b}
+@media (prefers-color-scheme:light){:root{--bg:#f4f6f8;--panel:#fff;--line:#dce2e8;--ink:#14191f;--mute:#5b6773;--accent:#1f6feb;--live:#15803d;--warn:#a16207;--bad:#c53030}}
+*{box-sizing:border-box;min-width:0}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:720px;margin:0 auto;padding:28px max(18px,env(safe-area-inset-left)) 48px}
+.cond{font-family:"Roboto Condensed","Arial Narrow","sans-serif-condensed",system-ui,sans-serif;font-stretch:condensed;font-weight:700;letter-spacing:-.01em}
+h1{font-size:36px;line-height:1.05;margin:0}
+.sub{color:var(--mute);margin:8px 0 0;overflow-wrap:anywhere}
+.sub strong{color:var(--ink);font-weight:600}
+section.block{border-top:1px solid var(--line);padding:26px 0 6px;margin-top:24px}
+.big{font-size:clamp(40px,11vw,68px);line-height:1;margin:0 0 10px}
+.figure{font-size:clamp(44px,12vw,76px);line-height:1}
+h3{font-size:24px;margin:0 0 10px}
+.mute{color:var(--mute)}
+.fine{color:var(--mute);font-size:14px}
+label{display:block;font-size:14px;color:var(--mute);margin:22px 0 6px}
+input[type=password]{width:100%;font:16px/1.4 inherit;padding:12px 14px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--ink)}
+label.check{display:flex;gap:10px;align-items:center;color:var(--ink);font-size:15px;margin:14px 0 18px;min-height:44px}
+label.check input{width:20px;height:20px;accent-color:var(--accent)}
+button{font:600 15px/1.2 inherit;min-height:44px;padding:10px 16px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer}
+button.primary{width:100%;background:var(--ink);color:var(--bg);border-color:var(--ink)}
+button:disabled{opacity:.55;cursor:default}
+button.ghost{background:transparent}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}
+.msg{min-height:1.5em;margin:12px 0 0}
+.msg.ok{color:var(--live)}.msg.bad,.bad{color:var(--bad)}
+.streams{list-style:none;margin:14px 0 0;padding:0}
+.stream{padding:12px 0 12px 16px;border-left:3px solid var(--live);margin:0 0 10px}
+.stream.off{border-left-color:var(--line)}
+.sname{font-weight:600;overflow-wrap:anywhere}
+.smeta{color:var(--mute);font-size:15px}
+.live-t{color:var(--live);font-weight:600}.warn{color:var(--warn);font-weight:600}
+.chart{margin-top:18px}
+.chart svg{display:block;width:100%;height:auto}
+.chart .bar{fill:var(--accent);opacity:.55}.chart .bar.now{opacity:1}.chart .bar.zero{opacity:.18}
+.chart text{fill:var(--mute);font-size:11px}
+table{width:100%;border-collapse:collapse;font-size:15px}
+th{font-weight:500;color:var(--mute);text-align:left;padding:8px 6px 8px 0;border-bottom:1px solid var(--line)}
+td{padding:12px 6px 12px 0;border-bottom:1px solid var(--line);vertical-align:top}
+tr.note td{padding-top:0;color:var(--mute);font-size:14px;overflow-wrap:anywhere}
+tr.has-note td{border-bottom:0}
+.num{text-align:right;white-space:nowrap}
+.badge{font-weight:600}.badge.live{color:var(--live)}.badge.idle{color:var(--ink)}.badge.bad{color:var(--bad)}
+footer{margin-top:28px}
+footer a{color:inherit}
+@media (prefers-reduced-motion:no-preference){.stream.on{animation:in .3s ease-out}@keyframes in{from{opacity:0;transform:translateY(4px)}}}
+</style>
+</head>
+<body data-now="{{NOW}}" data-version="{{VERSION}}">
+<div class="wrap">
+  <header>
+    <h1 class="cond">TeleMediaStream</h1>
+    <p class="sub" id="serves" data-host="{{HOST}}" data-problem="{{PROBLEM}}"></p>
+  </header>
+
+  <section id="login" hidden>
+    <form id="loginForm" novalidate>
+      <label for="secret">Stream secret</label>
+      <input id="secret" name="secret" type="password" autocomplete="current-password" autocapitalize="off" spellcheck="false">
+      <label class="check"><input id="remember" type="checkbox"> Remember on this device</label>
+      <button type="submit" class="primary" id="loginBtn">Open dashboard</button>
+      <p class="msg" id="loginMsg" role="alert"></p>
+    </form>
+    <p class="fine">Use this Worker's SHARED_SECRET to see everything, or a user's own secret to see just their bot.
+      The secret stays in your browser: the page signs each request with it instead of sending it.</p>
+  </section>
+
+  <section id="dash" hidden>
+    <div class="actions">
+      <button id="syncBtn" type="button">Sync settings now</button>
+      <button id="testBtn" type="button">Run self-test</button>
+      <button id="outBtn" type="button" class="ghost">Sign out</button>
+    </div>
+    <p class="msg" id="actMsg" role="status"></p>
+
+    <section class="block">
+      <h2 class="cond big" id="headline">Nothing playing</h2>
+      <p class="mute" id="liveHint">When someone plays a Cloudflare stream it shows here, with how much has been sent and how fast.</p>
+      <ul class="streams" id="streams"></ul>
+    </section>
+
+    <section class="block">
+      <div class="cond figure" id="today">0 B</div>
+      <p class="mute">sent today (UTC). Cloudflare's daily Free allowance resets at 00:00 UTC.</p>
+      <div class="chart" id="chart" role="img" aria-label="Data sent per hour over the last 24 hours, in UTC"></div>
+    </section>
+
+    <section class="block">
+      <h3 class="cond">Telegram bots</h3>
+      <table>
+        <thead><tr><th>Bot</th><th>State</th><th class="num">Playing</th><th class="num">Today</th></tr></thead>
+        <tbody id="bots"></tbody>
+      </table>
+    </section>
+
+    <footer class="fine">Updated <span id="updated">just now</span> · <a href="/status">/status</a> · <a href="/selftest">/selftest</a></footer>
+  </section>
+</div>
+<script nonce="{{NONCE}}">
+{
+  const $ = (id) => document.getElementById(id)
+  const KEY = 'telemediastream-secret'
+  const VERSION = document.body.dataset.version
+  const skew = Number(document.body.dataset.now) - Date.now() // signatures use the Worker's clock
+  const enc = new TextEncoder()
+  let secret = null, keyCache = null, timer = null, livePoll = false, prev = new Map(), updatedAt = 0, last = null
+
+  const store = {
+    get() { try { return sessionStorage.getItem(KEY) || localStorage.getItem(KEY) } catch { return null } },
+    set(v, remember) { try { (remember ? localStorage : sessionStorage).setItem(KEY, v) } catch {} },
+    clear() { try { sessionStorage.removeItem(KEY); localStorage.removeItem(KEY) } catch {} },
+  }
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+  const size = (n) => {
+    const u = ['B', 'KB', 'MB', 'GB', 'TB']
+    let i = 0
+    n = Number(n) || 0
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++ }
+    return (i && n < 10 ? n.toFixed(1) : Math.round(n)) + ' ' + u[i]
+  }
+  const dur = (s) => {
+    s = Math.max(0, Math.round(s))
+    if (s < 60) return s + ' s'
+    const m = Math.floor(s / 60)
+    return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + String(m % 60).padStart(2, '0') + ' min'
+  }
+  const ago = (s) => s == null ? 'not yet' : s < 45 ? 'just now' : s < 3600 ? Math.round(s / 60) + ' min ago' : (s / 3600).toFixed(1) + ' h ago'
+  const rate = (bytesPerSec) => {
+    const mbit = bytesPerSec * 8 / 1e6
+    return (mbit >= 10 ? Math.round(mbit) : mbit.toFixed(1)) + ' Mbit/s'
+  }
+  const setMsg = (id, text, kind) => { const el = $(id); el.textContent = text || ''; el.className = 'msg' + (kind ? ' ' + kind : '') }
+  const show = (view) => { $('login').hidden = view !== 'login'; $('dash').hidden = view !== 'dash' }
+
+  async function sign(message) {
+    if (!keyCache || keyCache.s !== secret) {
+      keyCache = { s: secret, k: await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']) }
+    }
+    const mac = new Uint8Array(await crypto.subtle.sign('HMAC', keyCache.k, enc.encode(message)))
+    return Array.from(mac, (b) => b.toString(16).padStart(2, '0')).join('')
+  }
+
+  async function api(method, path) {
+    const ts = String(Math.floor((Date.now() + skew) / 1000))
+    const sig = await sign(ts + '\n' + method + ' ' + path + '\n')
+    const res = await fetch(path, { method, cache: 'no-store', headers: { 'x-admin-time': ts, 'x-admin-sig': sig } })
+    let data = {}
+    try { data = await res.json() } catch {}
+    if (res.status === 401) { const e = new Error('Wrong secret'); e.auth = true; throw e }
+    if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status)
+    return data
+  }
+
+  function setServes(host, syncedAgo) {
+    const el = $('serves')
+    const h = host || el.dataset.host
+    if (!h) { el.innerHTML = '<span class="bad">' + esc(el.dataset.problem || 'APP_URL is not set on this Worker.') + '</span>'; return }
+    el.innerHTML = 'Serving links from <strong>' + esc(h) + '</strong>' +
+      (syncedAgo === undefined ? '' : ', settings synced ' + esc(ago(syncedAgo))) + ' · v' + esc(VERSION)
+  }
+
+  function drawChart(hours, firstHour) {
+    const el = $('chart')
+    if (!hours) { el.innerHTML = ''; return }
+    const W = Math.max(280, el.clientWidth || 600), H = 130, bw = W / 24
+    const max = Math.max(1, ...hours)
+    let svg = '<svg viewBox="0 0 ' + W + ' ' + (H + 20) + '" aria-hidden="true">'
+    hours.forEach((n, i) => {
+      const h = n ? Math.max(3, Math.round(n / max * H)) : 2
+      const hour = (firstHour + i) % 24
+      const x = i * bw + 2, w = Math.max(2, bw - 4)
+      const hh = String(hour).padStart(2, '0')
+      svg += '<rect x="' + x.toFixed(1) + '" y="' + (H - h) + '" width="' + w.toFixed(1) + '" height="' + h + '" rx="2" class="bar' +
+        (i === 23 ? ' now' : n ? '' : ' zero') + '"><title>' + hh + ':00 UTC: ' + esc(size(n)) + '</title></rect>'
+      if (hour % 6 === 0) svg += '<text x="' + (x + w / 2).toFixed(1) + '" y="' + (H + 15) + '" text-anchor="middle">' + hh + '</text>'
+    })
+    el.innerHTML = svg + '</svg>'
+  }
+
+  function streamRow(r, many) {
+    const stalled = r.playing && r.idleSeconds >= 10
+    const state = !r.playing ? '<span>stopped</span>'
+      : stalled ? '<span class="warn">no data for ' + r.idleSeconds + ' s</span>'
+      : '<span class="live-t">' + rate(r.speed) + '</span>'
+    const bits = [state, esc(size(r.bytes)) + ' sent', esc(dur(r.seconds))]
+    if (r.dc) bits.push('DC ' + esc(r.dc))
+    if (many) bits.push(esc(r.who === 'main' ? 'your bot' : r.who))
+    return '<li class="stream ' + (r.playing ? 'on' : 'off') + '"><div class="sname">' + esc(r.name || 'Untitled') +
+      '</div><div class="smeta">' + bits.join(' · ') + '</div></li>'
+  }
+
+  function botRow(c) {
+    const playing = (c.streams || []).filter((s) => s.playing).length
+    let state, cls, note = ''
+    if (c.error) { state = 'Unreachable'; cls = 'bad'; note = c.error }
+    else if (c.config !== 'ok') { state = 'Problem'; cls = 'bad'; note = c.config }
+    else if (playing) { state = 'Playing'; cls = 'live' }
+    else if (c.bot) { state = 'Asleep'; cls = 'idle' }
+    else { state = 'Not logged in yet'; cls = 'idle'; note = 'It logs in to Telegram on the first play.' }
+    if (!note && c.lastError) note = 'Last error: ' + c.lastError
+    const conns = Object.values(c.connections || {}).reduce((a, b) => a + b, 0)
+    const extra = (c.bot ? ' · DC ' + c.bot.dc : '') + (conns ? ' · ' + conns + (conns === 1 ? ' connection' : ' connections') : '')
+    const name = c.name === 'main' ? 'Your bot' : c.name
+    return '<tr' + (note ? ' class="has-note"' : '') + '><td>' + esc(name) + '</td><td><span class="badge ' + cls + '">' + state +
+      '</span><span class="mute">' + esc(extra) + '</span></td><td class="num">' + playing + '</td><td class="num">' +
+      esc(c.error ? '' : size(c.today)) + '</td></tr>' + (note ? '<tr class="note"><td colspan="4">' + esc(note) + '</td></tr>' : '')
+  }
+
+  function render(st) {
+    last = st
+    updatedAt = Date.now()
+    const main = st.clients.find((c) => c.name === 'main') || st.clients[0]
+    setServes(st.app, main ? main.syncedAgo : null)
+    const now = Date.now(), seen = new Map(), rows = []
+    for (const c of st.clients) {
+      for (const s of c.streams || []) {
+        // speed over at least 3 s (shorter windows jump with each burst); the average until then
+        const key = c.name + '/' + s.id, p = prev.get(key)
+        let speed, ref
+        if (p && now - p.t >= 3000) {
+          speed = Math.max(0, (s.bytes - p.bytes) / ((now - p.t) / 1000))
+          ref = { bytes: s.bytes, t: now, speed }
+        } else if (p) {
+          speed = p.speed
+          ref = p
+        } else {
+          speed = s.seconds > 0 ? s.bytes / s.seconds : 0
+          ref = { bytes: s.bytes, t: now, speed }
+        }
+        seen.set(key, ref)
+        rows.push({ ...s, who: c.name, speed })
+      }
+    }
+    prev = seen
+    const playing = rows.filter((r) => r.playing).length
+    livePoll = playing > 0
+    $('headline').textContent = playing ? (playing === 1 ? '1 playing' : playing + ' playing') : 'Nothing playing'
+    $('liveHint').hidden = rows.length > 0
+    rows.sort((a, b) => (b.playing - a.playing) || (b.bytes - a.bytes))
+    $('streams').innerHTML = rows.map((r) => streamRow(r, st.clients.length > 1)).join('')
+    $('today').textContent = size(st.today)
+    drawChart(st.hours, st.firstHour)
+    $('bots').innerHTML = st.clients.map(botRow).join('')
+  }
+
+  async function refresh() {
+    clearTimeout(timer)
+    try {
+      render(await api('GET', '/admin/api/state'))
+      if ($('actMsg').classList.contains('bad')) setMsg('actMsg', '')
+    } catch (e) {
+      if (e.auth) return signOut('Your secret no longer matches this Worker. Sign in again.')
+      setMsg('actMsg', 'Could not update: ' + e.message, 'bad')
+    }
+    schedule()
+  }
+
+  // every 5 s while something plays, every 20 s otherwise, never while the page is hidden
+  function schedule() {
+    clearTimeout(timer)
+    if (secret && !document.hidden) timer = setTimeout(refresh, livePoll ? 5000 : 20000)
+  }
+
+  function signOut(message) {
+    secret = null
+    keyCache = null
+    prev = new Map()
+    clearTimeout(timer)
+    store.clear()
+    setServes(null, undefined)
+    show('login')
+    setMsg('loginMsg', message || '', message ? 'bad' : '')
+  }
+
+  async function action(id, path, done) {
+    const btn = $(id)
+    btn.disabled = true
+    try { done(await api('POST', path)) } catch (e) {
+      if (e.auth) return signOut('Your secret no longer matches this Worker. Sign in again.')
+      setMsg('actMsg', e.message, 'bad')
+    } finally { btn.disabled = false }
+  }
+
+  $('loginForm').addEventListener('submit', async (ev) => {
+    ev.preventDefault()
+    const value = $('secret').value.trim()
+    if (!value) return setMsg('loginMsg', 'Enter the secret.', 'bad')
+    secret = value
+    $('loginBtn').disabled = true
+    setMsg('loginMsg', 'Checking…')
+    try {
+      const st = await api('GET', '/admin/api/state')
+      store.set(value, $('remember').checked)
+      $('secret').value = ''
+      setMsg('loginMsg', '')
+      show('dash')
+      render(st)
+      schedule()
+    } catch (e) {
+      secret = null
+      setMsg('loginMsg', e.auth ? 'Wrong secret.' : 'Could not reach this Worker: ' + e.message, 'bad')
+    } finally { $('loginBtn').disabled = false }
+  })
+
+  $('syncBtn').addEventListener('click', () => action('syncBtn', '/admin/api/sync', (r) => {
+    const failed = (r.results || []).filter((x) => x.error)
+    setMsg('actMsg', failed.length ? 'Sync failed: ' + failed.map((x) => (x.name === 'main' ? 'your bot' : x.name) + ': ' + x.error).join('; ') : 'Settings synced from the app.', failed.length ? 'bad' : 'ok')
+    refresh()
+  }))
+  $('testBtn').addEventListener('click', () => action('testBtn', '/admin/api/selftest', (r) => {
+    setMsg('actMsg', r.cached ? 'Self-test already passed in the last minute.'
+      : 'Self-test passed: decrypted ' + r.decryptedMB + ' MB in one request (' + r.segmentMB + ' MB per segment).', 'ok')
+  }))
+  $('outBtn').addEventListener('click', () => signOut(''))
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) clearTimeout(timer)
+    else if (secret) refresh()
+  })
+  const ro = new ResizeObserver(() => { if (last) drawChart(last.hours, last.firstHour) })
+  ro.observe($('chart'))
+  setInterval(() => {
+    if (!updatedAt) return
+    const s = Math.round((Date.now() - updatedAt) / 1000)
+    $('updated').textContent = s < 5 ? 'just now' : s + ' s ago'
+  }, 1000)
+
+  setServes(null, undefined)
+  const saved = store.get()
+  if (!saved) show('login')
+  else {
+    secret = saved
+    api('GET', '/admin/api/state').then((st) => { show('dash'); render(st); schedule() }).catch((e) => {
+      if (e.auth) return signOut('Sign in again: this Worker\'s secret changed.')
+      secret = null
+      show('login')
+      setMsg('loginMsg', 'Could not reach this Worker: ' + e.message, 'bad')
+    })
+  }
+}
+</script>
+</body>
+</html>

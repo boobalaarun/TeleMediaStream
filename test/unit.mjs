@@ -14,6 +14,7 @@ import { factorize, rsaPad } from '../src/mtproto/auth.js'
 import { verifyLink, signRequest, verifyRequest, decodeStreamId } from '../src/links.js'
 import { parseRange } from '../src/http.js'
 import { tenants, secretFor, objectName, memberName, secretKey, MAIN } from '../src/tenants.js'
+import { addBytes, mergeHours, summarize, hourOf } from '../src/stats.js'
 import { appUrl, locationHint } from '../src/settings.js'
 import { makeRsaKey } from './fake-telegram.mjs'
 
@@ -245,6 +246,25 @@ function igeRef(plain, key, iv) {
   assert(appUrl({}) === '' && appUrl({ APP_URL: 5 }) === '', 'missing APP_URL')
   assert(locationHint({}) === 'apac' && locationHint({ LOCATION_HINT: ' WEUR ' }) === 'weur' && locationHint({ LOCATION_HINT: 'mars' }) === 'apac', 'location hint')
   ok('APP_URL accepts an https origin only (plain http just for local tests); LOCATION_HINT validated')
+}
+
+// ---------- dashboard: bytes per UTC hour ----------
+{
+  const H = 3600000
+  const t0 = Date.UTC(2026, 10, 23, 22, 30) // 22:30 UTC
+  const pending = {}
+  addBytes(pending, 100, t0)
+  addBytes(pending, 50, t0 + 10 * 60000) // same hour
+  addBytes(pending, 7, t0 + 2 * H) // 00:30 UTC the next day
+  assert(pending[hourOf(t0)] === 150 && pending[hourOf(t0) + 2] === 7, 'bytes land in their UTC hour')
+  const saved = { [hourOf(t0) - 60]: 999, [hourOf(t0)]: 1 } // one hour too old to keep
+  mergeHours(saved, pending, t0 + 2 * H)
+  assert(!saved[hourOf(t0) - 60] && saved[hourOf(t0)] === 151, 'merge adds counts and drops hours past 48')
+  const s = summarize(saved, t0 + 2 * H)
+  assert(s.today === 7, 'today counts from 00:00 UTC only, got ' + s.today)
+  assert(s.hours.length === 24 && s.hours[23] === 7 && s.hours[21] === 151 && s.hours[22] === 0, 'last 24 hours, current last')
+  assert((s.firstHour + 23) % 24 === 0, 'firstHour lines up with the current hour')
+  ok('dashboard counts bytes per UTC hour: today from 00:00 UTC, last 24 hours, 48 hours kept')
 }
 
 console.log(`\nunit: ${passed} groups passed`)

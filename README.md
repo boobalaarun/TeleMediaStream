@@ -34,14 +34,16 @@ Use a **fork**: updating later is then one click (see [Updating](#updating)).
    | `APP_URL` | Text | the app's address, like `https://stream.example.com` |
    | `SHARED_SECRET` | Secret | **A:** a new random secret, 40+ letters and digits (use a password manager). **B:** the secret the app's owner gave you. |
 
-4. Open your Worker's address: it should say `OK (serves <the app's host> only)`. Then open
-   `/selftest`: it should say `"ok": true`.
+4. Open your Worker's address in a browser: the [dashboard](#dashboard) opens and says
+   **Serving links from** the app's host. Sign in with your `SHARED_SECRET` and press
+   **Run self-test**: it should say **Self-test passed**.
 
 ## Setup A: you run the app
 
 5. In the app's **Cloudflare** streaming settings: Worker URL = your Worker's address, secret = your
    `SHARED_SECRET`, and offer both the normal and the **(Cloudflare)** streams → Save.
-6. Open `/status`: `"config": "ok"`. Play a title and pick the **(Cloudflare)** stream. When it works,
+6. Press **Sync settings now** on the dashboard: **Your bot** should show no problem. Play a title
+   and pick the **(Cloudflare)** stream: it appears on the dashboard with its speed. When it works,
    switch the app to Cloudflare streams only.
 
 ### Your users
@@ -58,7 +60,8 @@ your main one or another user's), then choose where their streams run:
   them off.
 
 Then, in your app's settings for that user, enter the Worker's address (theirs or yours) and their
-secret → Save. For a user on your Worker, `/status/<name>` should then show `"config": "ok"`.
+secret → Save. A user on your Worker then appears under **Telegram bots** on your dashboard, with no
+problem shown.
 
 ## Setup B: you use someone else's app
 
@@ -67,7 +70,7 @@ account in the app must stream with **your own bots** (a Telegram bot and a priv
 app's page for your account shows how).
 
 5. After step 4, send the owner your Worker's address. They enter it for your account.
-6. Open `/status`: `"config": "ok"`.
+6. Press **Sync settings now** on your dashboard: **Your bot** should show no problem.
 7. On your account's page in the app, choose Cloudflare streaming → Save, then reinstall the app in
    your player. Play a title.
 
@@ -87,14 +90,34 @@ All in Cloudflare → your Worker → Settings → Variables and Secrets. Nothin
 | `APP_URL` | yes | The app's address (https, no path). The only app this Worker serves. |
 | `SHARED_SECRET` | yes | **A:** the same value as the Cloudflare secret in the app's settings. **B:** the secret the owner gave you. |
 | `USER_SECRET_<NAME>` | no | **A** only: one per user you host on your Worker (see [Your users](#your-users)). |
-| `SEGMENT_MB` | no | MB per Durable Object request. Default 512. Set `1` if `/selftest` fails. |
+| `SEGMENT_MB` | no | MB per Durable Object request. Default 512. Set `1` if the self-test fails. |
 | `LOCATION_HINT` | no | Where the Durable Object is first created: `apac` (default), `weur`, `eeur`, `enam`, `wnam`, `sam`, `oc`, `afr`, `me`. Set it before the first play; it doesn't move an existing object. |
+
+## Dashboard
+
+Open your Worker's address in a browser (it goes to `/admin`) and sign in with a secret:
+
+- **What's playing:** each stream's file name, speed, data sent, playing time and data centre, with
+  a warning when one stops getting data.
+- **Sent today (UTC)**, with a bar for each of the last 24 hours. Cloudflare's daily Free allowance
+  resets at 00:00 UTC.
+- **Telegram bots:** your bot and each user you host, with its state (playing, asleep, not logged in
+  yet, or the problem in plain words) and what it sent today.
+- **Sync settings now** re-reads the bot settings from the app. **Run self-test** proves the Durable
+  Object CPU budget.
+
+Sign in with `SHARED_SECRET` to see every bot, or with a user's `USER_SECRET_` to see only theirs.
+The page signs each request with the secret instead of sending it, and keeps it for that tab only,
+or on the device if you tick **Remember on this device**. It updates every 5 seconds while something
+plays and every 20 seconds otherwise, and stops while the tab is in the background.
 
 ## Status pages
 
+For scripts and quick checks; no sign-in.
+
 | Page | Shows |
 |---|---|
-| `/` | version and the app host it serves |
+| `/` | version and the app host it serves (a browser goes to the dashboard instead) |
 | `/selftest` | proves the Durable Object CPU budget (decrypts 128 MB in one request) |
 | `/status` | the bot's login, live streams (data centre, MB sent, idle seconds), connections, last error |
 | `/status/<name>` | the same for one user you host on your Worker |
@@ -110,6 +133,8 @@ They contain no secrets, file names or viewer IPs, but they are public: use plai
   of Durable Object time, roughly **29 hours of streaming in total**. Users you host on your Worker
   share yours; users with their own Worker use their own.
 - One Telegram bot per object (the first token the app sends).
+- An open dashboard makes one request every 5 seconds while something plays (every 20 otherwise),
+  about 720 an hour at most: a small part of the 100,000 a day.
 - Split files, zip files and search results are redirected to the app, which streams them itself.
 
 ## Troubleshooting
@@ -118,14 +143,15 @@ They contain no secrets, file names or viewer IPs, but they are public: use plai
 |---|---|
 | Your Worker's address says APP_URL is not set or not valid | add `APP_URL` as `https://the-app-host` (no path), then Deploy |
 | 403 "Link expired or not signed" | the secrets differ, or the link is over 48 h old: open the title again |
-| `/status`: "The app rejected this Worker" | **A:** `SHARED_SECRET` ≠ the app's Cloudflare secret. **B:** the owner hasn't entered your Worker yet, or your secret differs |
-| `/status`: "The app returned no bot token" | **B:** your own bots are off or not verified in the app yet |
-| `/status/<name>`: "The app rejected user …" | that user's secret in the app ≠ `USER_SECRET_<NAME>` |
-| `/status/<name>`: "The app returned no bots for user …" | that user's own bots are off or not verified yet |
+| Dashboard or `/status`: "The app rejected this Worker" | **A:** `SHARED_SECRET` ≠ the app's Cloudflare secret. **B:** the owner hasn't entered your Worker yet, or your secret differs |
+| Dashboard or `/status`: "The app returned no bot token" | **B:** your own bots are off or not verified in the app yet |
+| Dashboard or `/status/<name>`: "The app rejected user …" | that user's secret in the app ≠ `USER_SECRET_<NAME>` |
+| Dashboard or `/status/<name>`: "The app returned no bots for user …" | that user's own bots are off or not verified yet |
+| Dashboard sign-in says "Wrong secret" | it must equal `SHARED_SECRET` (or that user's `USER_SECRET_`) exactly |
 | "The bot cannot see channel …" | make that bot an admin of the channel |
 | "Telegram rejected the bot login" | check BOT_TOKEN / API_ID / API_HASH in the app |
-| `/selftest` fails, or error 1102 | add `SEGMENT_MB` = `1`, then Deploy |
-| A stream is listed in `/status` but never starts | watch `idleSeconds`: climbing means stuck, so close the player and play again; slowly rising `mb` means a far data centre |
+| Self-test fails, or error 1102 | add `SEGMENT_MB` = `1`, then Deploy |
+| A stream shows "no data for … s" (or a climbing `idleSeconds` in `/status`) | it is stuck: close the player and play again. A low speed that keeps going means a far data centre |
 | Everyone's stream drops at once | a redeploy, or too many viewers for one object's memory |
 | Error 1027, or failures late in the day | the daily Free allowance is used up; it resets at 00:00 UTC |
 | Cloudflare opens a pull request renaming the Worker, or a build fails on a name mismatch | your Worker's name in Cloudflare isn't `telemediastream`. Don't merge that pull request (later Sync forks may then need a manual merge): delete the Worker and import your fork again with that name |
@@ -134,6 +160,8 @@ They contain no secrets, file names or viewer IPs, but they are public: use plai
 
 - `SHARED_SECRET` (and each `USER_SECRET_`) lets the Worker fetch bot tokens from the app. Keep them
   only in Cloudflare and the app; never put them in the repo or a chat.
+- The dashboard shows file names. Anyone with `SHARED_SECRET` can see what's playing and press
+  Sync settings now or Run self-test there; nothing more.
 - With a fork, your Worker only changes when **you** press Sync fork.
 - If the app changes how it talks to Cloudflare Workers, this Worker may need an update too.
 
@@ -156,7 +184,7 @@ and signatures with the app's own Python code, so they need Python 3 and the app
 ## Support
 
 This project is shared as is, so the issue tracker is off. The [Troubleshooting](#troubleshooting)
-table and your Worker's `/status` page cover the usual problems.
+table and your Worker's dashboard cover the usual problems.
 
 ## Credits and license
 

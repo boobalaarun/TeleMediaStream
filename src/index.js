@@ -8,6 +8,7 @@ import { appUrl, locationHint, APP_URL_HELP } from './settings.js'
 import { verifyLink, verifyRequest, decodeStreamId } from './links.js'
 import { parseRange, fileNameAndMime, streamHeaders, text } from './http.js'
 import { tenants, objectName, MAIN } from './tenants.js'
+import { handleAdmin } from './admin.js'
 
 export { TeleCore }
 
@@ -146,6 +147,9 @@ export default {
       return jsonResponse({ ok: r.ok }, r.ok ? 200 : 502)
     }
 
+    // The dashboard: /admin (the page) and /admin/api/* (calls signed with your secret)
+    if (url.pathname === '/admin' || url.pathname.startsWith('/admin/')) return handleAdmin(request, env, url, core)
+
     // /status: you; /status/<name>: one user (no secrets, file names or viewer IPs in either)
     if (method === 'GET' && (url.pathname === '/status' || url.pathname.startsWith('/status/'))) {
       const { list, ignored } = tenants(env)
@@ -172,6 +176,10 @@ export default {
     }
 
     if (url.pathname === '/' && (method === 'GET' || method === 'HEAD')) {
+      // A browser gets the dashboard; scripts and health checks get one line of text
+      if (method === 'GET' && (request.headers.get('accept') || '').includes('text/html')) {
+        return Response.redirect(new URL('/admin', url).href, 302)
+      }
       const app = appUrl(env)
       if (!app) return text(500, `telemediastream ${VERSION}: ${APP_URL_HELP}`)
       return text(200, `telemediastream ${VERSION}: OK (serves ${new URL(app).host} only)`)

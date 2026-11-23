@@ -15,6 +15,7 @@ import {
   DC_ADDRS, RSA_KEYS, DH_PRIME_OVERRIDE, SEGMENT_BYTES, PREFETCH, CONFIG_TTL_MS, REPORT_EVERY_MS, VERSION,
 } from './config.js'
 import { appUrl, APP_URL_HELP } from './settings.js'
+import { addBytes, mergeHours, summarize } from './stats.js'
 
 const FILE_TTL_MS = 6 * 3600 * 1000
 const STREAM_IDLE_MS = 30000
@@ -36,6 +37,9 @@ export class TeleCore {
     this.starts = []
     this.reportTimer = null
     this.lastError = ''
+    this.hourBytes = {} // bytes per UTC hour not yet saved (see flushStats)
+    this.statsChain = Promise.resolve()
+    this.syncedAt = 0 // last time the app's settings were fetched
     this.tenant = null // 'main' (your bots) or a user's name; set by the front Worker's x-tenant header
     this.tg = new TelegramClient({
       connect,
@@ -56,6 +60,7 @@ export class TeleCore {
       try {
         const cfg = await this._fetchAppConfig()
         this.cfg = cfg
+        this.syncedAt = Date.now()
         await this.ctx.storage.put('appcfg', { apiId: cfg.apiId, apiHash: cfg.apiHash, bots: cfg.bots })
         return cfg
       } catch (e) {
@@ -158,6 +163,7 @@ export class TeleCore {
           return json({ ok: true })
         case '/status': return json(await this.status())
         case '/selftest': return json(this.selftest())
+        case '/admin': return json(await this.adminState())
         default: return new Response('not found', { status: 404 })
       }
     } catch (e) {
@@ -281,6 +287,7 @@ export class TeleCore {
         pos = off + to
         stream.bytes += n
         stream.last = Date.now()
+        addBytes(this.hourBytes, n)
         this.usage[token] = (this.usage[token] || 0) + n
         this.scheduleReport()
       }
@@ -294,6 +301,49 @@ export class TeleCore {
       stream.active--
       stream.last = Date.now()
       this.scheduleReport()
+    }
+  }
+
+  // ---------- dashboard (/admin; the front Worker checks the secret first) ----------
+  // Saves the bytes counted since the last save; one save at a time so none is lost
+  flushStats() {
+    this.statsChain = this.statsChain.catch(() => {}).then(async () => {
+      const pending = this.hourBytes
+      if (!Object.keys(pending).length) return
+      this.hourBytes = {}
+      try {
+        const saved = (await this.ctx.storage.get('hourly')) || {}
+        await this.ctx.storage.put('hourly', mergeHours(saved, pending))
+      } catch (e) {
+        mergeHours(this.hourBytes, pending)
+        throw e
+      }
+    })
+    return this.statsChain
+  }
+
+  async adminState() {
+    let config = 'not loaded'
+    try { await this.appConfig(); config = 'ok' } catch (e) { config = String(e && e.message ? e.message : e) }
+    try { await this.tg._load() } catch {}
+    await this.flushStats().catch(() => {})
+    const now = Date.now()
+    const { today, hours, firstHour } = summarize((await this.ctx.storage.get('hourly')) || {}, now)
+    // streams that are playing, or stopped in the last 15 s
+    const live = [...this.streams.values()].filter((s) => s.active > 0 || now - s.last < 15000)
+    return {
+      name: this.tenant || MAIN,
+      version: VERSION,
+      config,
+      syncedAgo: this.syncedAt ? Math.round((now - this.syncedAt) / 1000) : null,
+      bot: this.tg.home ? { dc: this.tg.home.dc } : null,
+      connections: this.tg.connectionCounts(),
+      streams: live.map((s) => ({
+        id: s.id, name: s.name, dc: s.info ? s.info.dc : null, bytes: s.bytes, playing: s.active > 0,
+        seconds: Math.round((now - s.since) / 1000), idleSeconds: Math.round((now - s.last) / 1000),
+      })),
+      today, hours, firstHour,
+      lastError: this.lastError || null,
     }
   }
 
@@ -324,6 +374,7 @@ export class TeleCore {
   }
 
   async report() {
+    await this.flushStats().catch((e) => console.log('[core] stats not saved: ' + e.message))
     const now = Date.now()
     for (const [k, s] of this.streams) if (s.active === 0 && now - s.last > STREAM_IDLE_MS) this.streams.delete(k)
     const usage = this.usage
