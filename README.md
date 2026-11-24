@@ -79,7 +79,8 @@ app's page for your account shows how).
 When this repo gets a new version: GitHub → **your fork** → **Sync fork** → **Update branch**.
 Cloudflare rebuilds and redeploys in about a minute; your settings and secrets stay.
 A redeploy cuts streams that are playing at that moment, so update when nobody is watching.
-Your Worker's address then shows the new version number.
+Your Worker's address then shows the new version number. If it doesn't, see
+[Troubleshooting](#troubleshooting).
 
 ## Settings
 
@@ -155,6 +156,7 @@ They contain no secrets, file names or viewer IPs, but they are public: use plai
 | Everyone's stream drops at once | a redeploy, or too many viewers for one object's memory |
 | Error 1027, or failures late in the day | the daily Free allowance is used up; it resets at 00:00 UTC |
 | Cloudflare opens a pull request renaming the Worker, or a build fails on a name mismatch | your Worker's name in Cloudflare isn't `telemediastream`. Don't merge that pull request (later Sync forks may then need a manual merge): delete the Worker and import your fork again with that name |
+| Sync fork (or a push) doesn't change the version, or Settings → Builds says "This project is disconnected from your Git account" | Cloudflare's GitHub app can't see your repo. GitHub → Settings → Applications → **Cloudflare Workers and Pages** → Configure → add your repo under **Only select repositories** → Save. Then Cloudflare → your Worker → Settings → Builds → **Disconnect** → **Connect**: pick your repo (it may preselect another one), branch `main`, deploy command `npx wrangler deploy`. Reconnecting doesn't build by itself; the next Sync fork or push does |
 
 ## Security
 
