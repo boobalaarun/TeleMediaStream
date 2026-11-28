@@ -29,7 +29,8 @@ const tokenHash = (t) => toHex(sha256(enc.encode(t))).slice(0, 16)
 export class TelegramClient {
   /**
    * opts: { connect, storage, dcAddrs: {dc: [host, port]}, rsaKeys: [{fp,n,e}] (BigInt),
-   *         getAppConfig: () => Promise<{apiId, apiHash, bots}>, log }
+   *         getAppConfig: () => Promise<{apiId, apiHash, bots}>, log,
+   *         onFlood?: ({ seconds, waited, dc, text }) => void  (each FLOOD_WAIT from Telegram) }
    */
   constructor(opts) {
     this.o = opts
@@ -278,7 +279,13 @@ export class TelegramClient {
             continue
           }
           if (e.text === 'AUTH_KEY_DUPLICATED') { await this._dropKey(dc); continue }
-          if (e.code === 420 && e.value !== null && e.value <= 15) { await sleep(e.value * 1000 + 300); continue }
+          if (e.code === 420) {
+            // FLOOD_WAIT_X: Telegram wants the bot to slow down. Short waits are sat out here;
+            // longer ones end this request (the front Worker asks again a little later).
+            const waitOut = e.value !== null && e.value <= 15
+            try { if (this.o.onFlood) this.o.onFlood({ seconds: e.value, waited: waitOut, dc, text: e.text }) } catch {}
+            if (waitOut) { await sleep(e.value * 1000 + 300); continue }
+          }
           if (e.code === 500 || e.code === -500 || e.code === -503) { await sleep(800); continue }
           throw e
         }

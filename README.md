@@ -99,7 +99,11 @@ All in Cloudflare → your Worker → Settings → Variables and Secrets. Nothin
 Open your Worker's address in a browser (it goes to `/admin`) and sign in with a secret:
 
 - **What's playing:** each stream's file name, speed, data sent, playing time and data centre, with
-  a warning when one stops getting data.
+  a warning when one stops getting data, and how much of the time it waited for Telegram (above 50%,
+  Telegram is slower than the player: the cause of buffering).
+- **Today, in words:** how often Telegram slowed the bot down (and the longest wait), how often
+  Cloudflare dropped the link to the Durable Object (the stream carries on from the same byte), whether
+  Telegram kept up with the player, and about how much of the daily Free allowance is used.
 - **Sent today (UTC)**, with a bar for each of the last 24 hours. Cloudflare's daily Free allowance
   resets at 00:00 UTC.
 - **Telegram bots:** your bot and each user you host, with its state (playing, asleep, not logged in
@@ -120,7 +124,7 @@ For scripts and quick checks; no sign-in.
 |---|---|
 | `/` | version and the app host it serves (a browser goes to the dashboard instead) |
 | `/selftest` | proves the Durable Object CPU budget (decrypts 128 MB in one request) |
-| `/status` | the bot's login, live streams (data centre, MB sent, idle seconds), connections, last error |
+| `/status` | the bot's login, live streams (data centre, MB sent, idle seconds, speed, % of time waiting for Telegram), connections, the last error and what it means, and today's `health` (counts) and `summary` (the same in sentences) |
 | `/status/<name>` | the same for one user you host on your Worker |
 
 They contain no secrets, file names or viewer IPs, but they are public: use plain labels for `<NAME>`.
@@ -134,6 +138,9 @@ They contain no secrets, file names or viewer IPs, but they are public: use plai
   of Durable Object time, roughly **29 hours of streaming in total**. Users you host on your Worker
   share yours; users with their own Worker use their own.
 - One Telegram bot per object (the first token the app sends).
+- The allowance figures on the dashboard and in `/status` are estimates this Worker keeps itself.
+  When Cloudflare stops a Worker for a limit, the Worker's code doesn't run, so it can't record that:
+  your Worker's **Metrics** and **Logs** in Cloudflare show those.
 - An open dashboard makes one request every 5 seconds while something plays (every 20 otherwise),
   about 720 an hour at most: a small part of the 100,000 a day.
 - Split files, zip files and search results are redirected to the app, which streams them itself.
@@ -153,6 +160,9 @@ They contain no secrets, file names or viewer IPs, but they are public: use plai
 | "Telegram rejected the bot login" | check BOT_TOKEN / API_ID / API_HASH in the app |
 | Self-test fails, or error 1102 | add `SEGMENT_MB` = `1`, then Deploy |
 | A stream shows "no data for … s" (or a climbing `idleSeconds` in `/status`) | it is stuck: close the player and play again. A low speed that keeps going means a far data centre |
+| Buffering, and "waiting for Telegram" is above 50% | Telegram sends this file slower than the player plays it (often a far data centre, or slow-downs: see **Today**). The Worker can't make Telegram faster; a lower-bitrate copy of the file can help |
+| **Today** says Cloudflare dropped the link to the Durable Object | a short Cloudflare hiccup. Since 2.2.0 the stream carries on from the same byte; if it happens often, note the times and check Cloudflare's status page |
+| **Today** says Telegram slowed the bot down | Telegram rations each bot. Waits up to 15 s are sat out; longer ones pause the stream while it is asked for again. Several viewers on one bot make it more likely |
 | Everyone's stream drops at once | a redeploy, or too many viewers for one object's memory |
 | Error 1027, or failures late in the day | the daily Free allowance is used up; it resets at 00:00 UTC |
 | Cloudflare opens a pull request renaming the Worker, or a build fails on a name mismatch | your Worker's name in Cloudflare isn't `telemediastream`. Don't merge that pull request (later Sync forks may then need a manual merge): delete the Worker and import your fork again with that name |
@@ -173,11 +183,14 @@ Decrypting Telegram's MTProto (AES-256-IGE) costs about 6–7 ms of CPU per MB, 
 gets only 10 ms per request. So the front Worker only checks the signed link and passes bytes, while
 SQLite-backed Durable Objects (allowed on Free, 30 s of CPU per request) log in to Telegram as the bot
 over TCP, download 1 MB parts in parallel, decrypt them in WebAssembly and stream them in order.
-Long ranges are served as 512 MB segments joined into one response.
+Long ranges are served as 512 MB segments joined into one response. If Cloudflare drops the link to the
+Durable Object mid-stream (it calls this "Network connection lost" and says to retry), the front Worker
+asks for the rest from the next byte, up to 5 times in a row, so the player only sees a short pause.
 
 ## Tests
 
-`npm ci`, then `npm test` (unit + Telegram client against a fake multi-data-centre Telegram) and
+`npm ci`, then `npm test` (unit, the stream relay and health counters, and the Telegram client
+against a fake multi-data-centre Telegram) and
 `npm run test:e2e` (the real Worker and Durable Objects in workerd with a fake app). Both check links
 and signatures with the app's own Python code, so they need Python 3 and the app's source: set
 `APP_SRC` to that folder. `node test/crosscheck.mjs` also compares the encryption with pyrofork

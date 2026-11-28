@@ -56,6 +56,10 @@ tr.note td{padding-top:0;color:var(--mute);font-size:14px;overflow-wrap:anywhere
 tr.has-note td{border-bottom:0}
 .num{text-align:right;white-space:nowrap}
 .badge{font-weight:600}.badge.live{color:var(--live)}.badge.idle{color:var(--ink)}.badge.bad{color:var(--bad)}
+.health{list-style:none;margin:6px 0 0;padding:0}
+.health li{padding:8px 0 8px 16px;border-left:3px solid var(--line);margin:0 0 8px;overflow-wrap:anywhere}
+.health li.warn-l{border-left-color:var(--warn)}
+.health .who{font-weight:600;margin-right:6px}
 footer{margin-top:28px}
 footer a{color:inherit}
 @media (prefers-reduced-motion:no-preference){.stream.on{animation:in .3s ease-out}@keyframes in{from{opacity:0;transform:translateY(4px)}}}
@@ -98,6 +102,11 @@ footer a{color:inherit}
       <div class="cond figure" id="today">0 B</div>
       <p class="mute">sent today (UTC). Cloudflare's daily Free allowance resets at 00:00 UTC.</p>
       <div class="chart" id="chart" role="img" aria-label="Data sent per hour over the last 24 hours, in UTC"></div>
+    </section>
+
+    <section class="block">
+      <h3 class="cond">Today</h3>
+      <ul class="health" id="health"></ul>
     </section>
 
     <section class="block">
@@ -199,6 +208,10 @@ footer a{color:inherit}
       : '<span class="live-t">' + rate(r.speed) + '</span>'
     const bits = [state, esc(size(r.bytes)) + ' sent', esc(dur(r.seconds))]
     if (r.dc) bits.push('DC ' + esc(r.dc))
+    if (r.telegramWaitPct != null && r.bytes >= 8 * 1048576) {
+      bits.push(r.telegramWaitPct >= 50 ? '<span class="warn">waiting for Telegram ' + r.telegramWaitPct + '% of the time</span>'
+        : 'waiting for Telegram ' + r.telegramWaitPct + '% of the time')
+    }
     if (many) bits.push(esc(r.who === 'main' ? 'your bot' : r.who))
     return '<li class="stream ' + (r.playing ? 'on' : 'off') + '"><div class="sname">' + esc(r.name || 'Untitled') +
       '</div><div class="smeta">' + bits.join(' · ') + '</div></li>'
@@ -212,7 +225,7 @@ footer a{color:inherit}
     else if (playing) { state = 'Playing'; cls = 'live' }
     else if (c.bot) { state = 'Asleep'; cls = 'idle' }
     else { state = 'Not logged in yet'; cls = 'idle'; note = 'It logs in to Telegram on the first play.' }
-    if (!note && c.lastError) note = 'Last error: ' + c.lastError
+    if (!note && c.lastError) note = 'Last error: ' + (c.lastErrorExplained ? c.lastErrorExplained + ' (' + c.lastError + ')' : c.lastError)
     const conns = Object.values(c.connections || {}).reduce((a, b) => a + b, 0)
     const extra = (c.bot ? ' · DC ' + c.bot.dc : '') + (conns ? ' · ' + conns + (conns === 1 ? ' connection' : ' connections') : '')
     const name = c.name === 'main' ? 'Your bot' : c.name
@@ -256,6 +269,14 @@ footer a{color:inherit}
     $('today').textContent = size(st.today)
     drawChart(st.hours, st.firstHour)
     $('bots').innerHTML = st.clients.map(botRow).join('')
+    // Today, in words: slow-downs, dropped links, Telegram vs player, Free-plan use (per bot when several)
+    const many = st.clients.length > 1
+    $('health').innerHTML = st.clients.filter((c) => Array.isArray(c.summary)).map((c) => c.summary.map((line) => {
+      const worry = /slowed the bot down (once|twice|\d+ times)|dropped the link|slower than the player/.test(line) ||
+        (c.health && (c.health.gbSecondsPct >= 75 || c.health.requestsPct >= 75) && /^Today so far/.test(line))
+      return '<li' + (worry ? ' class="warn-l"' : '') + '>' + (many ? '<span class="who">' + esc(c.name === 'main' ? 'Your bot' : c.name) + '</span>' : '') +
+        esc(line) + '</li>'
+    }).join('')).join('')
   }
 
   async function refresh() {

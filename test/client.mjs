@@ -61,6 +61,26 @@ try {
   assert(B.equal(a, fileBytes(12, 0, world.files.get(12).size)) && B.equal(b, fileBytes(13, 0, 777)), 'parallel downloads')
   ok('two files downloaded concurrently over the DC5 connection pool')
 
+  // 3b. Telegram slows the bot down: a 1 s FLOOD_WAIT is sat out, a 40 s one ends that request;
+  // both are reported (the Durable Object counts them for /status and the dashboard)
+  const floods = []
+  const tgf = new TelegramClient({
+    connect, storage, dcAddrs, rsaKeys, getAppConfig: async () => appCfg, log: (m) => logs.push(m), onFlood: (f) => floods.push(f),
+  })
+  world.flood = { count: 1, seconds: 1 }
+  const tf = Date.now()
+  const p0 = await tgf.part(info12, 0, () => tgf.fileInfo(chat, 12))
+  assert(B.equal(p0, fileBytes(12, 0, PART)) && Date.now() - tf >= 1000, 'short wait sat out, then the part arrived')
+  world.flood = { count: 1, seconds: 40 }
+  let ef = null
+  try { await tgf.part(info12, PART, () => tgf.fileInfo(chat, 12)) } catch (e) { ef = e }
+  assert(ef && /FLOOD_WAIT_40/.test(ef.message), 'long wait ends the request: ' + (ef && ef.message))
+  assert(floods.length === 2 && floods[0].waited === true && floods[0].seconds === 1 && floods[0].dc === 5 &&
+    floods[1].waited === false && floods[1].seconds === 40, 'reported: ' + JSON.stringify(floods))
+  world.flood = null
+  tgf.closeAll()
+  ok('Telegram slow-downs are reported: a 1 s FLOOD_WAIT is sat out, a 40 s one ends that request')
+
   // 4. Telegram forgets the DC5 key -> transport -404 -> new key + re-import
   world.forgetKeysForDc(5)
   const p = await tg.part(info, 2 * PART, () => tg.fileInfo(chat, 11))

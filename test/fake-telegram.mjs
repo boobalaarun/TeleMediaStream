@@ -62,6 +62,7 @@ export class World {
     this.fileRefVersion = 1
     this.getFileCalls = 0
     this.expireRefAfter = opts.expireRefAfter ?? 3 // FILE_REFERENCE_EXPIRED once, after this many getFile calls
+    this.flood = null // { count, seconds }: the next `count` getFile calls answer FLOOD_WAIT_<seconds>
     this.files = new Map([
       [11, { id: 9001n, accessHash: -5555n, size: 5 * 1048576 + 123457, name: 'Arinthum Ariyamalum (2005) 1080p.mkv', mime: 'video/x-matroska', seed: 11 }],
       [12, { id: 9002n, accessHash: 6666n, size: 9 * 1048576 + 99, name: 'Pattiyal (2006) 720p.mp4', mime: 'video/mp4', seed: 12 }],
@@ -446,6 +447,7 @@ class Conn {
         if (this.dc !== W.fileDc) return this.rpcResult(msgId, RPC_ERROR(303, 'FILE_MIGRATE_' + W.fileDc))
         const f = [...W.files.values()].find((x) => x.id === docId && x.accessHash === ah)
         if (!f) return this.rpcResult(msgId, RPC_ERROR(400, 'FILE_ID_INVALID'))
+        if (W.flood && W.flood.count > 0) { W.flood.count--; return this.rpcResult(msgId, RPC_ERROR(420, 'FLOOD_WAIT_' + W.flood.seconds)) }
         W.getFileCalls++
         if (W.expireRefAfter && W.getFileCalls === W.expireRefAfter) { W.fileRefVersion++; W.expireRefAfter = 0 }
         if (!B.equal(ref, W.fileRef())) return this.rpcResult(msgId, RPC_ERROR(400, 'FILE_REFERENCE_EXPIRED'))

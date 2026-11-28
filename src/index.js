@@ -9,8 +9,11 @@ import { verifyLink, verifyRequest, decodeStreamId } from './links.js'
 import { parseRange, fileNameAndMime, streamHeaders, text } from './http.js'
 import { tenants, objectName, MAIN } from './tenants.js'
 import { handleAdmin } from './admin.js'
+import { relay, RETRY_DELAYS_MS } from './relay.js'
 
 export { TeleCore }
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // /dl/{token}/{id}/{name}: token is letters+digits, id is base62; the name is free text (not signed)
 const DL = /^\/dl\/([A-Za-z0-9_-]+)\/([A-Za-z0-9]+)\/(.*)$/
@@ -29,6 +32,23 @@ const jsonResponse = (obj, status = 200) =>
 async function passError(res) {
   const msg = (await res.text()) || 'Streaming failed'
   return text(res.status >= 400 ? res.status : 502, msg)
+}
+
+// The first segment of a play. Cloudflare can drop the link to a Durable Object while it
+// restarts or moves ("Network connection lost"); two more tries on a new stub ride that out.
+async function firstSegment(env, tenant, params) {
+  let lastErr
+  for (let i = 0; i < 3; i++) {
+    try {
+      return await core(env, tenant).fetch('/seg?' + new URLSearchParams(params))
+    } catch (e) {
+      lastErr = e
+      if (e && e.overloaded) break // Cloudflare says not to retry an overloaded object
+      console.log(`[front] could not reach the Durable Object (${e && e.message ? e.message : e}); trying again`)
+      if (i < 2) await sleep(RETRY_DELAYS_MS[i])
+    }
+  }
+  throw lastErr
 }
 
 async function handleDl(request, env, ctx, m) {
@@ -68,7 +88,12 @@ async function handleDl(request, env, ctx, m) {
     chat: String(chat), msg: String(msg), token, file: id, name,
     ip: request.headers.get('cf-connecting-ip') || '', ua: (request.headers.get('user-agent') || '').slice(0, 200),
   }
-  const first = await stub.fetch('/seg?' + new URLSearchParams({ ...base, range, first: '1' }))
+  let first
+  try {
+    first = await firstSegment(env, tenant, { ...base, range, first: '1' })
+  } catch (e) {
+    return text(503, `The Worker could not reach its Durable Object: ${e && e.message ? e.message : e}`, { 'Retry-After': '2' })
+  }
   if (first.status === 416) {
     return text(416, 'Range not satisfiable', { 'Content-Range': `bytes */${first.headers.get('x-size')}` })
   }
@@ -80,23 +105,15 @@ async function handleDl(request, env, ctx, m) {
   const info = { mime: first.headers.get('x-mime') || '', name: decodeURIComponent(first.headers.get('x-name') || '') }
   const out = new FixedLengthStream(end - start + 1)
 
-  const pump = async () => {
-    let res = first
-    let segEnd = Number(first.headers.get('x-seg-end'))
-    try {
-      for (;;) {
-        await res.body.pipeTo(out.writable, { preventClose: true })
-        if (segEnd >= end) break
-        res = await stub.fetch('/seg?' + new URLSearchParams({ ...base, start: String(segEnd + 1), end: String(end) }))
-        if (!res.ok) throw new Error('segment failed: HTTP ' + res.status)
-        segEnd = Number(res.headers.get('x-seg-end'))
-      }
-      await out.writable.close()
-    } catch (e) {
-      try { await out.writable.abort(e) } catch {}
-    }
-  }
-  ctx.waitUntil(pump())
+  // Segment after segment; after a dropped link, the rest again from the next byte (relay.js).
+  // Each call gets a new stub: Cloudflare says a stub that failed this way fails again at once.
+  const nextSegment = (from, to, resumed) => core(env, tenant).fetch('/seg?' + new URLSearchParams({
+    ...base, start: String(from), end: String(to), ...(resumed ? { resume: resumed } : {}),
+  }))
+  ctx.waitUntil(
+    relay({ first, start, end, nextSegment, writable: out.writable, sleep, log: (m) => console.log('[front] ' + m) })
+      .catch((e) => console.log('[front] stream relay failed: ' + (e && e.stack ? e.stack : e))),
+  )
   return new Response(out.readable, {
     status: range ? 206 : 200,
     headers: streamHeaders(fileNameAndMime(info, name), start, end, size, !!range),

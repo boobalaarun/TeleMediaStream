@@ -16,9 +16,17 @@ import {
 } from './config.js'
 import { appUrl, APP_URL_HELP } from './settings.js'
 import { addBytes, mergeHours, summarize } from './stats.js'
+import { Health, healthLines, explainError, waitPct } from './health.js'
 
 const FILE_TTL_MS = 6 * 3600 * 1000
 const STREAM_IDLE_MS = 30000
+const HEALTH_SAVE_MS = 15000
+
+// A stream's average speed and how much of its time went on waiting for Telegram (public: no names)
+const streamFigures = (s, now) => {
+  const secs = Math.max(1, ((s.active > 0 ? now : s.last) - s.since) / 1000)
+  return { mbps: Math.round((s.bytes * 8) / secs / 1e5) / 10, telegramWaitPct: waitPct(s.telegramWaitMs || 0, s.playerWaitMs || 0) }
+}
 
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' } })
@@ -41,6 +49,9 @@ export class TeleCore {
     this.statsChain = Promise.resolve()
     this.syncedAt = 0 // last time the app's settings were fetched
     this.tenant = null // 'main' (your bots) or a user's name; set by the front Worker's x-tenant header
+    this.health = new Health() // today's slow-downs, dropped links and Free-plan use (health.js)
+    this.healthLoaded = null
+    this.healthTimer = null
     this.tg = new TelegramClient({
       connect,
       storage: ctx.storage,
@@ -49,7 +60,41 @@ export class TeleCore {
       dhPrime: DH_PRIME_OVERRIDE,
       getAppConfig: () => this.appConfig(),
       log: (m) => console.log('[tg] ' + m),
+      onFlood: (f) => {
+        this.health.slowdown(f)
+        console.log(`[tg] Telegram asked the bot to wait ${f.seconds} s (${f.text}, DC ${f.dc})${f.waited ? '; waiting it out' : '; too long, this request stops'}`)
+        this.saveHealthSoon()
+      },
     })
+  }
+
+  // ---------- health counters (kept across restarts for the day) ----------
+  loadHealth() {
+    if (!this.healthLoaded) {
+      this.healthLoaded = this.ctx.storage.get('health')
+        .then((saved) => this.health.load(saved))
+        .catch(() => { this.healthLoaded = null })
+    }
+    return this.healthLoaded
+  }
+
+  saveHealthSoon() {
+    if (this.healthTimer) return
+    this.healthTimer = setTimeout(() => {
+      this.healthTimer = null
+      this.saveHealth().catch((e) => console.log('[core] health not saved: ' + e.message))
+    }, HEALTH_SAVE_MS)
+  }
+
+  async saveHealth() {
+    if (!this.health.dirty) return
+    this.health.dirty = false
+    await this.ctx.storage.put('health', this.health.saved())
+  }
+
+  healthReport() {
+    const h = this.health.snapshot()
+    return { health: h, summary: healthLines(h) }
   }
 
   // ---------- settings from the app ----------
@@ -149,9 +194,16 @@ export class TeleCore {
     const url = new URL(request.url)
     // Each object belongs to one tenant: its id is derived from the same name (see tenants.js)
     if (!this.tenant) this.tenant = request.headers.get('x-tenant') || MAIN
+    await this.loadHealth()
+    this.health.request()
+    this.health.enter() // a stream keeps the object busy longer: segment() enters again for it
+    this.saveHealthSoon()
     try {
       switch (url.pathname) {
-        case '/seg': return await this.segment(url.searchParams)
+        case '/seg':
+          // the front Worker asks again after Cloudflare dropped its link to this object
+          if (url.searchParams.get('resume') === 'link') this.health.drop()
+          return await this.segment(url.searchParams)
         case '/info': {
           const info = await this.fileInfo(Number(url.searchParams.get('chat')), Number(url.searchParams.get('msg')))
           return json({ size: info.size, mime: info.mime, name: info.name, dc: info.dc })
@@ -171,6 +223,8 @@ export class TeleCore {
       this.lastError = String(e && e.message ? e.message : e).slice(0, 300)
       console.log('[core] error: ' + this.lastError)
       return new Response(this.lastError, { status, headers: { 'x-error': '1' } })
+    } finally {
+      this.health.leave()
     }
   }
 
@@ -192,9 +246,12 @@ export class TeleCore {
         mb: Math.round(s.bytes / 1048576),
         seconds: Math.round((now - s.since) / 1000),
         idleSeconds: Math.round((now - s.last) / 1000),
+        ...streamFigures(s, now),
       })),
       connections: this.tg.connectionCounts(),
       lastError: this.lastError || null,
+      lastErrorExplained: explainError(this.lastError),
+      ...this.healthReport(),
     }
   }
 
@@ -254,6 +311,7 @@ export class TeleCore {
 
   async pump(chat, msg, info, start, last, writer, stream, token) {
     stream.active++
+    this.health.enter()
     const queue = []
     let next = start - (start % PART)
     const fill = () => {
@@ -271,22 +329,29 @@ export class TeleCore {
       let pos = start
       while (pos <= last) {
         const { off, p } = queue.shift()
+        const t0 = Date.now()
         const data = await p
+        const telegramMs = Date.now() - t0 // the part wasn't here yet: waiting for Telegram
         fill()
         const from = pos - off
         const to = Math.min(data.length, last - off + 1)
         if (to <= from) throw new Error('Telegram returned less data than the file size')
         const piece = data.subarray(from, to)
+        const t1 = Date.now()
         try {
           await writer.write(piece)
         } catch {
           clientGone = true // player closed the connection or seeked: not an error
           break
         }
+        const playerMs = Date.now() - t1 // waiting for the player (through the front Worker) to take it
         const n = piece.length
         pos = off + to
         stream.bytes += n
         stream.last = Date.now()
+        stream.telegramWaitMs = (stream.telegramWaitMs || 0) + telegramMs
+        stream.playerWaitMs = (stream.playerWaitMs || 0) + playerMs
+        this.health.waits({ telegramMs, playerMs, bytes: n })
         addBytes(this.hourBytes, n)
         this.usage[token] = (this.usage[token] || 0) + n
         this.scheduleReport()
@@ -300,6 +365,8 @@ export class TeleCore {
     } finally {
       stream.active--
       stream.last = Date.now()
+      this.health.leave()
+      this.saveHealthSoon()
       this.scheduleReport()
     }
   }
@@ -341,9 +408,12 @@ export class TeleCore {
       streams: live.map((s) => ({
         id: s.id, name: s.name, dc: s.info ? s.info.dc : null, bytes: s.bytes, playing: s.active > 0,
         seconds: Math.round((now - s.since) / 1000), idleSeconds: Math.round((now - s.last) / 1000),
+        ...streamFigures(s, now),
       })),
       today, hours, firstHour,
       lastError: this.lastError || null,
+      lastErrorExplained: explainError(this.lastError),
+      ...this.healthReport(),
     }
   }
 
@@ -375,6 +445,7 @@ export class TeleCore {
 
   async report() {
     await this.flushStats().catch((e) => console.log('[core] stats not saved: ' + e.message))
+    await this.saveHealth().catch((e) => console.log('[core] health not saved: ' + e.message))
     const now = Date.now()
     for (const [k, s] of this.streams) if (s.active === 0 && now - s.last > STREAM_IDLE_MS) this.streams.delete(k)
     const usage = this.usage

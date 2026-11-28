@@ -7,7 +7,7 @@ import { TELEGRAM_RSA_KEYS } from './mtproto/rsa-keys.js'
 
 const T = typeof __TEST_OVERRIDES__ !== 'undefined' ? __TEST_OVERRIDES__ : null
 
-export const VERSION = '2.1.0'
+export const VERSION = '2.2.0'
 
 // Telegram production data centres (same addresses as pyrofork / Telegram docs)
 export const DC_ADDRS = (T && T.dcs) || {
