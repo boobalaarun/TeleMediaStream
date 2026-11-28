@@ -201,8 +201,7 @@ try {
   }
 
   // 7b. Telegram slows the bot down mid-stream: a 1 s wait is sat out in the object; a 20 s one
-  // ends the object's stream, and the front Worker asks again from the next byte. The player gets
-  // every byte, and /status says it in words.
+  // ends that stream, and the player's next request is exact again. /status says it in words.
   {
     const t = Date.now()
     world.flood = { count: 1, seconds: 1 }
@@ -210,15 +209,18 @@ try {
     assert(r1.status === 206 && B.equal(await bytesOf(r1), all12.subarray(0, 4000000)), 'exact after a short slow-down')
     world.flood = { count: 1, seconds: 20 }
     const r2 = await fetch(fileLink(12), { headers: { Range: 'bytes=2500000-7999999' } })
-    assert(r2.status === 206 && B.equal(await bytesOf(r2), all12.subarray(2500000, 8000000)), 'exact after a long slow-down')
+    const got = await bytesOf(r2).then((b) => b.length, () => -1)
+    assert(r2.status === 206 && got < 5500000, 'a long slow-down ends that stream: got ' + got)
     world.flood = null
+    const r3 = await fetch(fileLink(12), { headers: { Range: 'bytes=2500000-7999999' } })
+    assert(r3.status === 206 && B.equal(await bytesOf(r3), all12.subarray(2500000, 8000000)), 'the player asks again: exact')
     const st = await (await fetch(W + '/status')).json()
     const h = st.health || {}
-    assert(st.version === '2.2.0' && h.slowdowns === 2 && h.slowdownsGivenUp === 1 && h.longestSlowdown === 20, 'health ' + JSON.stringify(h))
+    assert(st.version === '2.2.1' && h.slowdowns === 2 && h.slowdownsGivenUp === 1 && h.longestSlowdown === 20, 'health ' + JSON.stringify(h))
     assert(h.requests > 0 && h.activeMs > 0 && typeof h.gbSecondsPct === 'number', 'usage counted ' + JSON.stringify(h))
-    assert(Array.isArray(st.summary) && /slowed the bot down twice today \(longest 20 s/.test(st.summary[0]) && /^Today so far: about/.test(st.summary.at(-1)), 'summary ' + JSON.stringify(st.summary))
+    assert(Array.isArray(st.summary) && /slowed the bot down twice today \(longest 20 s/.test(st.summary[0]) && /^Today so far: the Durable Object was busy for /.test(st.summary.at(-1)), 'summary ' + JSON.stringify(st.summary))
     assert(/wait 20 s/.test(st.lastErrorExplained || ''), 'last error in words: ' + st.lastErrorExplained)
-    ok(`Telegram slow-downs mid-stream: a 1 s one waited out, a 20 s one resumed from the same byte; /status says so in words (${Date.now() - t} ms)`)
+    ok(`Telegram slow-downs mid-stream: a 1 s one waited out; a 20 s one ends that stream and the next request is exact; /status says so in words (${Date.now() - t} ms)`)
   }
 
   // 8. usage and live streams reported to the app's dashboard

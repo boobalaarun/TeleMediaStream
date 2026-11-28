@@ -105,13 +105,14 @@ async function handleDl(request, env, ctx, m) {
   const info = { mime: first.headers.get('x-mime') || '', name: decodeURIComponent(first.headers.get('x-name') || '') }
   const out = new FixedLengthStream(end - start + 1)
 
-  // Segment after segment; after a dropped link, the rest again from the next byte (relay.js).
-  // Each call gets a new stub: Cloudflare says a stub that failed this way fails again at once.
+  // Segment after segment, copied by the runtime (relay.js). A failed request for the next
+  // segment is tried again with a new stub: Cloudflare says a stub that failed this way fails
+  // again at once.
   const nextSegment = (from, to, resumed) => core(env, tenant).fetch('/seg?' + new URLSearchParams({
     ...base, start: String(from), end: String(to), ...(resumed ? { resume: resumed } : {}),
   }))
   ctx.waitUntil(
-    relay({ first, start, end, nextSegment, writable: out.writable, sleep, log: (m) => console.log('[front] ' + m) })
+    relay({ first, end, nextSegment, writable: out.writable, sleep, log: (m) => console.log('[front] ' + m) })
       .catch((e) => console.log('[front] stream relay failed: ' + (e && e.stack ? e.stack : e))),
   )
   return new Response(out.readable, {

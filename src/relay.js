@@ -1,99 +1,85 @@
 // Copies a stream from the Durable Object into the player's response, segment by segment.
-// Cloudflare sometimes drops the link to a Durable Object mid-stream ("Network connection
-// lost": a transient error it says to retry). Then the rest is asked for again from the very
-// next byte, so the player only sees a short pause instead of a broken stream. A Telegram
-// error in the object (for example a long slow-down) is retried the same way. It gives up after
-// RETRY_DELAYS_MS.length tries in a row that bring less than 1 MB.
+//
+// The bytes are copied by the Workers runtime itself (pipeTo between two of its own streams):
+// no JavaScript runs per chunk, so a whole film costs this Worker almost no CPU time. That is
+// the point. A Free-plan Worker gets 10 ms of CPU per request, and 2.2.0 copied in a JavaScript
+// loop that counted every chunk (so it could resume after a dropped link): it used 1.8 s of CPU
+// in 12 minutes of a film, and Cloudflare stopped the stream ("Worker exceeded CPU time limit").
+//
+// The price: if the link to the Durable Object drops in the middle of a segment, nobody knows how
+// many bytes reached the player, so the response ends and the player asks again from where it
+// is. Where the position is known, at the start of every next segment, a failed request is tried
+// again (up to RETRY_DELAYS_MS.length times) with a new stub each time.
 
 export const RETRY_DELAYS_MS = [300, 1000, 2500, 5000, 8000]
-const PROGRESS = 1048576 // bytes that count as "it worked again": the try counter restarts
 
 // Cloudflare's own words for a dropped link to a Durable Object (versus an error from Telegram)
 export const isLinkDrop = (why) => /network connection lost|connection (closed|reset)|disconnected|no longer active/i.test(String(why || ''))
 
+const words = (e) => String(e && e.message ? e.message : e)
+
 /**
  * first: the object's Response for the first segment (x-seg-end header)
- * start, end: the byte range the player asked for (inclusive)
- * nextSegment(from, end, resumed): fetches the next segment; resumed is false for a plain next
- *   segment, 'link' after Cloudflare dropped the link, 'other' after any other interruption
+ * end: the last byte the player asked for (inclusive)
+ * nextSegment(from, end, resumed): fetches the segment that starts at `from`; resumed is false
+ *   for a plain next segment, 'link' when the try before failed on a dropped link, else 'other'
  * writable: the player's response body
- * Returns { done } | { gone } (the player stopped) | { failed } (gave up; the response is aborted)
+ * Returns { done } | { ended, why } (the player left, or a segment broke: the response ends here)
+ *   | { failed, why } (no next segment could be had: the response is aborted)
  */
-export async function relay({ first, start, end, nextSegment, writable, sleep, log = () => {}, onDrop = () => {} }) {
-  const writer = writable.getWriter()
+export async function relay({ first, end, nextSegment, writable, sleep, log = () => {} }) {
   let res = first
   let segEnd = Number(first.headers.get('x-seg-end'))
-  let pos = start // the next byte the player needs
-  let tries = 0
-  let failedAt = -Infinity
-
-  // A try that ends without the bytes we need: wait, then ask again (or give up)
-  const retry = async (why) => {
-    if (pos - failedAt >= PROGRESS) tries = 0
-    failedAt = pos
-    if (tries >= RETRY_DELAYS_MS.length) return false
-    const wait = RETRY_DELAYS_MS[tries++]
-    log(`stream interrupted at byte ${pos} (${why}); asking again from there in ${wait} ms (try ${tries} of ${RETRY_DELAYS_MS.length})`)
-    await sleep(wait)
-    return true
-  }
 
   const giveUp = async (err) => {
-    log(`stream stopped at byte ${pos}: ${err && err.message ? err.message : err}`)
-    try { await writer.abort(err) } catch {}
-    return { failed: true, pos }
+    log(`stream stopped before byte ${segEnd + 1}: ${words(err)}`)
+    try { await writable.abort(err) } catch {}
+    return { failed: true, why: words(err) }
   }
 
   for (;;) {
-    // 1. pass this segment's bytes on, counting them
-    let broke = null
-    const reader = res.body.getReader()
-    for (;;) {
-      let r
-      try {
-        r = await reader.read()
-      } catch (e) {
-        broke = e
-        break
-      }
-      if (r.done) break
-      try {
-        await writer.write(r.value)
-      } catch {
-        reader.cancel().catch(() => {}) // the player closed the connection or seeked: not an error
-        return { gone: true, pos }
-      }
-      pos += r.value.byteLength
+    // 1. this segment's bytes, copied by the runtime
+    try {
+      await res.body.pipeTo(writable, { preventClose: true })
+    } catch (e) {
+      // The player closed the connection (it stopped or seeked), or the object's stream broke.
+      // The runtime already ended the other side; nothing can be resumed without a byte count.
+      const why = words(e)
+      if (isLinkDrop(why)) log(`stream ended at an unknown byte (${why}): the link to the Durable Object dropped, or the player went away`)
+      try { await writable.abort(e) } catch {}
+      return { ended: true, why }
     }
 
-    // 2. finished the whole range?
-    if (!broke && pos > end) {
-      try { await writer.close() } catch {}
-      return { done: true, pos }
+    // 2. the whole range sent?
+    if (segEnd >= end) {
+      try { await writable.close() } catch {}
+      return { done: true }
     }
 
-    // 3. a segment ended early or broke: ask again from `pos`; a finished segment: ask for the next
+    // 3. the next segment starts at an exact, known byte: a failed request is tried again
+    const from = segEnd + 1
     let resumed = false
-    if (broke || pos <= segEnd) {
-      const why = broke ? String(broke.message || broke) : 'segment ended early'
-      onDrop(why)
-      if (!(await retry(why))) return giveUp(broke || new Error(why))
-      resumed = isLinkDrop(why) ? 'link' : 'other'
-    }
+    let tries = 0
     for (;;) {
       let err
       try {
-        res = await nextSegment(pos, end, resumed)
-        if (res.ok) break
-        const text = await res.text().catch(() => '')
-        err = new Error(`HTTP ${res.status}${text ? ': ' + text.slice(0, 200) : ''}`)
-        if (res.status < 500) return giveUp(err) // the object refused it: trying again won't help
+        const r = await nextSegment(from, end, resumed)
+        if (r.ok) {
+          res = r
+          break
+        }
+        const text = await r.text().catch(() => '')
+        err = new Error(`HTTP ${r.status}${text ? ': ' + text.slice(0, 200) : ''}`)
+        if (r.status < 500) return giveUp(err) // the object refused it: trying again won't help
       } catch (e) {
         err = e
+        if (e && e.overloaded) return giveUp(e) // Cloudflare says not to retry an overloaded object
       }
-      const why = String(err.message || err)
-      if (!(await retry(why))) return giveUp(err)
-      resumed = isLinkDrop(why) ? 'link' : resumed || 'other'
+      if (tries >= RETRY_DELAYS_MS.length) return giveUp(err)
+      const wait = RETRY_DELAYS_MS[tries++]
+      resumed = isLinkDrop(words(err)) ? 'link' : 'other'
+      log(`next segment from byte ${from} failed (${words(err)}); trying again in ${wait} ms (try ${tries} of ${RETRY_DELAYS_MS.length})`)
+      await sleep(wait)
     }
     segEnd = Number(res.headers.get('x-seg-end'))
   }

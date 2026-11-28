@@ -128,6 +128,13 @@ export function waitPct(telegramMs, playerMs) {
 const times = (n) => (n === 1 ? 'once' : n === 2 ? 'twice' : `${n} times`)
 const hhmm = (ms) => new Date(ms).toISOString().slice(11, 16) + ' UTC'
 const num = (n) => Math.round(n).toLocaleString('en-US')
+// 0 → "under a minute", 1344000 → "about 22 minutes", 5400000 → "about 1 h 30 min"
+export function duration(ms) {
+  const min = Math.round(ms / 60000)
+  if (min < 1) return 'under a minute'
+  if (min < 60) return `about ${min} minute${min === 1 ? '' : 's'}`
+  return `about ${Math.floor(min / 60)} h${min % 60 ? ` ${min % 60} min` : ''}`
+}
 
 // The same counters as sentences, for /status and the dashboard
 export function healthLines(h) {
@@ -138,8 +145,8 @@ export function healthLines(h) {
       `Telegram slowed the bot down ${times(h.slowdowns)} today (longest ${h.longestSlowdown} s, last at ${hhmm(h.lastSlowdownAt)}` +
       `${h.lastSlowdownDc ? ' on DC ' + h.lastSlowdownDc : ''}). ` +
       (!long ? `The Worker waited ${h.slowdowns === 1 ? 'it' : 'each one'} out.`
-        : long === h.slowdowns && long === 1 ? 'It was longer than 15 s, so the stream paused while it was asked for again.'
-        : `${long === h.slowdowns ? 'All' : long} of them ${long === 1 ? 'was' : 'were'} longer than 15 s, so the stream paused while it was asked for again.`),
+        : long === h.slowdowns && long === 1 ? 'It was longer than 15 s, so that stream stopped and the player had to ask again.'
+        : `${long === h.slowdowns ? 'All' : long} of them ${long === 1 ? 'was' : 'were'} longer than 15 s, so those streams stopped and the player had to ask again.`),
     )
   } else {
     lines.push('Telegram has not slowed the bot down today.')
@@ -153,8 +160,8 @@ export function healthLines(h) {
       : `While streaming today, the Worker spent ${h.telegramWaitPct}% of the time waiting for Telegram: Telegram kept up with the player.`)
   }
   lines.push(
-    `Today so far: about ${num(h.gbSeconds)} GB-s of Durable Object time (${h.gbSecondsPct}% of the Free plan's ${num(FREE_GB_S)}) ` +
-    `and ${num(h.requests)} requests (${h.requestsPct}% of ${num(FREE_REQUESTS)}).`,
+    `Today so far: the Durable Object was busy for ${duration(h.activeMs)} (${h.gbSecondsPct}% of the Free plan's ` +
+    `${Math.round(FREE_GB_S / OBJECT_GB / 3600)} hours a day) and served ${num(h.requests)} requests (${h.requestsPct}% of ${num(FREE_REQUESTS)}).`,
   )
   return lines
 }
@@ -164,7 +171,7 @@ export function explainError(text) {
   if (!text) return null
   const flood = /FLOOD_(?:PREMIUM_)?WAIT_(\d+)/.exec(text)
   if (flood) return `Telegram asked the bot to wait ${flood[1]} s before downloading more (a slow-down).`
-  if (/Network connection lost/i.test(text)) return "Cloudflare dropped the link to the Durable Object; the stream is asked for again from the same byte."
+  if (/Network connection lost/i.test(text)) return 'Cloudflare dropped a network link; the player has to ask for the stream again.'
   if (/FILE_REFERENCE_/.test(text)) return 'Telegram said the file link went stale; the Worker re-reads the message and tries again.'
   if (/CHANNEL_PRIVATE|CHANNEL_INVALID|CHAT_ADMIN_REQUIRED/.test(text)) return 'The bot cannot read that channel: it must be an admin there.'
   if (/ACCESS_TOKEN|BOT_|AUTH_KEY_UNREGISTERED|USER_DEACTIVATED/.test(text)) return 'Telegram refused the bot (its token was changed or revoked): check the bot in the app, then Sync settings.'

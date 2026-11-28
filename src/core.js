@@ -201,7 +201,7 @@ export class TeleCore {
     try {
       switch (url.pathname) {
         case '/seg':
-          // the front Worker asks again after Cloudflare dropped its link to this object
+          // the front Worker asks again for a next segment after Cloudflare dropped its link here
           if (url.searchParams.get('resume') === 'link') this.health.drop()
           return await this.segment(url.searchParams)
         case '/info': {
