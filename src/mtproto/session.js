@@ -31,7 +31,10 @@ function kdf(authKey, msgKey, x) {
 
 export class Session {
   /**
-   * opts: { connect, host, port, dcId, authKey?, salt?, timeOffset?, apiId?, onSalt?, log? }
+   * opts: { connect, host, port, dcId, authKey?, salt?, timeOffset?, apiId?, onSalt?, log?,
+   *         silentMs? }  silentMs: with requests waiting, a connection that receives nothing for
+   *         this long is dead (Telegram answers or acks quickly, even when slow): it is closed, so
+   *         every waiting request fails now and is asked again on a new connection.
    */
   constructor(opts) {
     this.opts = opts
@@ -47,6 +50,8 @@ export class Session {
     this.initDone = false
     this.plainWaiter = null
     this.chain = Promise.resolve()
+    this.waitingSince = 0 // when requests started waiting (pending went from none to some)
+    this.watch = null
     this.setAuthKey(opts.authKey || null, opts.salt || 0n)
   }
 
@@ -81,6 +86,7 @@ export class Session {
     if (this.closed) return
     this.closed = true
     if (this.ackTimer) clearTimeout(this.ackTimer)
+    if (this.watch) { clearInterval(this.watch); this.watch = null }
     const e = err || new Error('connection closed')
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(e) }
     this.pending.clear()
@@ -163,13 +169,31 @@ export class Session {
         reject(new Error('Telegram request timed out'))
       }, timeoutMs)
       p.msgId = msgId
+      if (!this.pending.size) this.waitingSince = Date.now()
       this.pending.set(msgId, p)
+      this._watchSilence()
       this._send(msgId, this._nextSeq(true), body).catch((e) => {
         this.pending.delete(msgId)
         clearTimeout(p.timer)
         reject(e)
       })
     })
+  }
+
+  // While requests wait: nothing received for `silentMs` (counted from the later of the last
+  // received byte and the start of the wait) means the connection died without telling us.
+  _watchSilence() {
+    const ms = this.opts.silentMs
+    if (!ms || this.watch || this.closed) return
+    this.watch = setInterval(() => {
+      if (!this.pending.size) { clearInterval(this.watch); this.watch = null; return }
+      const quiet = Date.now() - Math.max(this.transport.lastReceive, this.waitingSince)
+      if (quiet >= ms) {
+        const e = new Error(`Telegram DC ${this.dcId} sent nothing for ${Math.round(quiet / 1000)} s`)
+        e.silent = true
+        this.close(e)
+      }
+    }, Math.max(50, Math.min(2000, Math.floor(ms / 4))))
   }
 
   _resend(oldId) {

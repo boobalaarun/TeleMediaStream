@@ -1,6 +1,7 @@
 // Today's health counters for /status and the dashboard, in numbers and in plain words:
-// how often Telegram slowed the bot down, how often Cloudflare dropped the link to this
-// Durable Object mid-stream (the front Worker then carries on from the same byte), how much of
+// how often Telegram slowed the bot down, how often a Telegram connection went silent (replaced)
+// or Telegram stayed silent long enough that a stream was ended so the player asks again, how
+// often Cloudflare dropped the link to this Durable Object between segments, how much of
 // the streaming time was spent waiting on Telegram rather than on the player, and roughly how
 // much of the Free plan's daily allowance this object has used. Counters restart at 00:00 UTC,
 // when Cloudflare's daily allowance does. A Worker can't see Cloudflare stopping it for a
@@ -19,6 +20,7 @@ export function emptyDay(day) {
     day,
     slowdowns: 0, slowdownSeconds: 0, longestSlowdown: 0, slowdownsGivenUp: 0, lastSlowdownAt: 0, lastSlowdownDc: null,
     drops: 0, lastDropAt: 0,
+    silentConnections: 0, stalls: 0, lastStallAt: 0,
     requests: 0, activeMs: 0,
     telegramWaitMs: 0, playerWaitMs: 0, bytes: 0,
   }
@@ -67,6 +69,20 @@ export class Health {
   drop() {
     this.d.lastDropAt = this._roll()
     this.d.drops++
+    this.dirty = true
+  }
+
+  // a Telegram connection received nothing while requests waited: closed and replaced
+  silentConnection() {
+    this._roll()
+    this.d.silentConnections++
+    this.dirty = true
+  }
+
+  // a stream waited past the stall limit for Telegram and was ended so the player asks again
+  stalled() {
+    this.d.lastStallAt = this._roll()
+    this.d.stalls++
     this.dirty = true
   }
 
@@ -151,6 +167,13 @@ export function healthLines(h) {
   } else {
     lines.push('Telegram has not slowed the bot down today.')
   }
+  if (h.silentConnections) {
+    lines.push(`A Telegram connection went silent ${times(h.silentConnections)} today; the Worker closed it and asked again on a new one.`)
+  }
+  if (h.stalls) {
+    lines.push(`Telegram stayed silent for a whole stream ${times(h.stalls)} today (last at ${hhmm(h.lastStallAt)}), so the Worker ended ` +
+      `${h.stalls === 1 ? 'that stream' : 'those streams'} for the player to ask again.`)
+  }
   if (h.drops) {
     lines.push(`Cloudflare dropped the link to this Worker's Durable Object ${times(h.drops)} today (last at ${hhmm(h.lastDropAt)}); the stream carried on from the same byte.`)
   }
@@ -171,6 +194,8 @@ export function explainError(text) {
   if (!text) return null
   const flood = /FLOOD_(?:PREMIUM_)?WAIT_(\d+)/.exec(text)
   if (flood) return `Telegram asked the bot to wait ${flood[1]} s before downloading more (a slow-down).`
+  if (/sent nothing for this stream/.test(text)) return 'Telegram stopped answering for that stream, so the Worker ended it and the player asks again.'
+  if (/sent nothing for \d+ s/.test(text)) return 'A Telegram connection went silent; the Worker closed it and asked again on a new one.'
   if (/Network connection lost/i.test(text)) return 'Cloudflare dropped a network link; the player has to ask for the stream again.'
   if (/FILE_REFERENCE_/.test(text)) return 'Telegram said the file link went stale; the Worker re-reads the message and tries again.'
   if (/CHANNEL_PRIVATE|CHANNEL_INVALID|CHAT_ADMIN_REQUIRED/.test(text)) return 'The bot cannot read that channel: it must be an admin there.'

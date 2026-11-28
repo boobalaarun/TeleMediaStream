@@ -14,6 +14,8 @@ const MAX_CONN_PER_DC = 2
 // and the calls to the app always have room; a second connection to a DC is only a bonus.
 const MAX_TG_CONNECTIONS = 4
 const IDLE_CLOSE_MS = 30000
+// A 1 MB part normally arrives in about a second; one that takes this long is asked for again
+const PART_TIMEOUT_MS = 15000
 const FIRST_DC = 2
 
 export class HttpError extends Error {
@@ -30,7 +32,11 @@ export class TelegramClient {
   /**
    * opts: { connect, storage, dcAddrs: {dc: [host, port]}, rsaKeys: [{fp,n,e}] (BigInt),
    *         getAppConfig: () => Promise<{apiId, apiHash, bots}>, log,
-   *         onFlood?: ({ seconds, waited, dc, text }) => void  (each FLOOD_WAIT from Telegram) }
+   *         onFlood?: ({ seconds, waited, dc, text }) => void  (each FLOOD_WAIT from Telegram),
+   *         silentMs?: a connection with requests waiting that receives nothing for this long is
+   *           closed and the requests are asked again on a new one (0: off),
+   *         onSilent?: ({ dc }) => void  (each connection closed that way),
+   *         partTimeoutMs?: a file part not answered this long is asked for again (default 15 s) }
    */
   constructor(opts) {
     this.o = opts
@@ -154,14 +160,19 @@ export class TelegramClient {
     const [host, port] = this._addr(dc)
     const s = new Session({
       connect: this.o.connect, host, port, dcId: dc, connectTimeoutMs: this.o.connectTimeoutMs,
-      authKey: st.authKey, salt: st.salt, timeOffset: st.timeOffset, apiId: cfg.apiId,
+      authKey: st.authKey, salt: st.salt, timeOffset: st.timeOffset, apiId: cfg.apiId, silentMs: this.o.silentMs,
       onSalt: (salt) => {
         const cur = this.dc.get(dc)
         if (cur && cur.authKey === st.authKey && cur.salt !== salt) { cur.salt = salt; this._saveDc(dc).catch(() => {}) }
       },
-      onClose: (sess) => {
+      onClose: (sess, e) => {
         const pool = this.pools.get(dc)
         if (pool) this.pools.set(dc, pool.filter((x) => x !== sess))
+        if (e && e.silent) {
+          // the waiting requests fail now and call() asks them again on another connection
+          this.log(`dc${dc}: ${e.message}; closed that connection, asking again on a new one`)
+          try { if (this.o.onSilent) this.o.onSilent({ dc }) } catch {}
+        }
       },
     })
     await s.open()
@@ -260,13 +271,13 @@ export class TelegramClient {
   }
 
   // ---------- requests with recovery ----------
-  async call(dc, body, { authorize = true } = {}) {
+  async call(dc, body, { authorize = true, timeoutMs } = {}) {
     let lastErr
     for (let attempt = 0; attempt < 4; attempt++) {
       if (authorize) await this.ensureAuthorized(dc)
       const s = await this._session(dc)
       try {
-        return await s.invoke(body)
+        return await s.invoke(body, timeoutMs ? { timeoutMs } : undefined)
       } catch (e) {
         lastErr = e
         if (e instanceof TransportError && e.code === -404) { await this._dropKey(dc); continue }
@@ -281,7 +292,7 @@ export class TelegramClient {
           if (e.text === 'AUTH_KEY_DUPLICATED') { await this._dropKey(dc); continue }
           if (e.code === 420) {
             // FLOOD_WAIT_X: Telegram wants the bot to slow down. Short waits are sat out here;
-            // longer ones end this request (the front Worker asks again a little later).
+            // longer ones end this request (and the stream: the player asks again).
             const waitOut = e.value !== null && e.value <= 15
             try { if (this.o.onFlood) this.o.onFlood({ seconds: e.value, waited: waitOut, dc, text: e.text }) } catch {}
             if (waitOut) { await sleep(e.value * 1000 + 300); continue }
@@ -290,7 +301,8 @@ export class TelegramClient {
           throw e
         }
         if (e instanceof HttpError) throw e
-        // dropped connection / timeout: retry on a fresh session
+        // dropped or silent connection, or a timeout: ask again (a closed session has left the
+        // pool, so this goes to another connection or a new one)
         if (attempt < 3) continue
         throw e
       }
@@ -414,7 +426,8 @@ export class TelegramClient {
     for (let attempt = 0; ; attempt++) {
       const usedRef = info.fileReference
       try {
-        const res = await this.call(info.dc, TL.uploadGetFile(info, offset, PART))
+        // a part whose answer got lost on a live connection is asked again after partTimeoutMs
+        const res = await this.call(info.dc, TL.uploadGetFile(info, offset, PART), { timeoutMs: this.o.partTimeoutMs || PART_TIMEOUT_MS })
         if (res._ !== 'upload.file') throw new Error('unexpected file reply ' + res._)
         return res.bytes
       } catch (e) {

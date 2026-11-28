@@ -18,6 +18,7 @@ export class Transport {
     this.onPacket = () => {}
     this.onClose = () => {}
     this.lastActivity = Date.now()
+    this.lastReceive = Date.now() // last time Telegram sent anything on this connection
   }
 
   // Fails after `timeoutMs` instead of waiting forever: Cloudflare queues a connection beyond
@@ -44,6 +45,7 @@ export class Transport {
       }
     }
     await this.writer.write(new Uint8Array([0xee, 0xee, 0xee, 0xee]))
+    this.lastReceive = Date.now()
     this._loop = this._readLoop()
   }
 
@@ -96,7 +98,7 @@ export class Transport {
         const { value, done } = await reader.read()
         if (done) break
         if (!value || !value.length) continue
-        this.lastActivity = Date.now()
+        this.lastActivity = this.lastReceive = Date.now()
         chunks.push(value instanceof Uint8Array ? value : new Uint8Array(value))
         have += value.length
         for (;;) {

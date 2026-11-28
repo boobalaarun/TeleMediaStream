@@ -63,6 +63,8 @@ APP_URL = "${APP}/"
 SHARED_SECRET = "${SECRET}"
 USER_SECRET_ALICE = "${SECRET_ALICE}"
 USER_SECRET_DUP = "${SECRET}"
+TG_SILENT_MS = "1500"
+STALL_LIMIT_MS = "4000"
 
 [[durable_objects.bindings]]
 name = "CORE"
@@ -216,11 +218,47 @@ try {
     assert(r3.status === 206 && B.equal(await bytesOf(r3), all12.subarray(2500000, 8000000)), 'the player asks again: exact')
     const st = await (await fetch(W + '/status')).json()
     const h = st.health || {}
-    assert(st.version === '2.2.1' && h.slowdowns === 2 && h.slowdownsGivenUp === 1 && h.longestSlowdown === 20, 'health ' + JSON.stringify(h))
+    assert(st.version === '2.3.0' && h.slowdowns === 2 && h.slowdownsGivenUp === 1 && h.longestSlowdown === 20, 'health ' + JSON.stringify(h))
     assert(h.requests > 0 && h.activeMs > 0 && typeof h.gbSecondsPct === 'number', 'usage counted ' + JSON.stringify(h))
     assert(Array.isArray(st.summary) && /slowed the bot down twice today \(longest 20 s/.test(st.summary[0]) && /^Today so far: the Durable Object was busy for /.test(st.summary.at(-1)), 'summary ' + JSON.stringify(st.summary))
     assert(/wait 20 s/.test(st.lastErrorExplained || ''), 'last error in words: ' + st.lastErrorExplained)
     ok(`Telegram slow-downs mid-stream: a 1 s one waited out; a 20 s one ends that stream and the next request is exact; /status says so in words (${Date.now() - t} ms)`)
+  }
+
+  // 7c. A Telegram connection dies silently mid-stream: it is closed after TG_SILENT_MS and the
+  // part asked again on a new one; the player gets every byte. 7d. Telegram answers no download
+  // at all: /status says the stream is waiting for Telegram, and after STALL_LIMIT_MS the stream
+  // is ended on purpose (the player's connection breaks, so it asks again); the next request is exact.
+  {
+    const t = Date.now()
+    world.silent = { count: 1 }
+    const r1 = await fetch(fileLink(12), { headers: { Range: 'bytes=1000000-6999999' } })
+    assert(r1.status === 206 && B.equal(await bytesOf(r1), all12.subarray(1000000, 7000000)), 'exact over a silent connection')
+    const tookSilent = Date.now() - t
+    assert(world.silent.count === 0 && tookSilent >= 1500, 'a connection went silent and was replaced, in ' + tookSilent + ' ms')
+
+    world.mute = true
+    const t2 = Date.now()
+    const r2 = await fetch(fileLink(12), { headers: { Range: 'bytes=3000000-' } })
+    assert(r2.status === 206, 'headers come at once: ' + r2.status)
+    const body = bytesOf(r2).then((b) => ({ n: b.length }), (e) => ({ err: String(e && e.message ? e.message : e) }))
+    await sleep(2500)
+    const mid = await (await fetch(W + '/status')).json()
+    const waiting = (mid.streams || []).find((s) => s.waitingFor === 'telegram')
+    assert(waiting && waiting.waitingSeconds >= 1, 'status shows the stream waiting for Telegram: ' + JSON.stringify(mid.streams))
+    const end = await body
+    const tookStall = Date.now() - t2
+    assert(!('n' in end && end.n === f12.size - 3000000), 'the stream was ended, not completed: ' + JSON.stringify(end))
+    assert(tookStall >= 3500 && tookStall < 9000, 'ended after about STALL_LIMIT_MS: ' + tookStall + ' ms')
+    world.mute = false
+    const r3 = await fetch(fileLink(12), { headers: { Range: 'bytes=3000000-' } })
+    assert(r3.status === 206 && B.equal(await bytesOf(r3), all12.subarray(3000000)), 'the next request is exact')
+    const st = await (await fetch(W + '/status')).json()
+    const h = st.health || {}
+    assert(h.silentConnections >= 2 && h.stalls === 1, 'counted: ' + JSON.stringify(h))
+    assert(st.summary.some((l) => /went silent/.test(l)) && st.summary.some((l) => /stayed silent for a whole stream once today/.test(l)), 'in words: ' + JSON.stringify(st.summary))
+    assert(/stopped answering for that stream/.test(st.lastErrorExplained || ''), 'last error in words: ' + st.lastErrorExplained)
+    ok(`silent Telegram: a dead connection is replaced without a gap the player notices (${tookSilent} ms); with no answers at all the stream ends after ${tookStall} ms so the player can ask again, and the next request is exact`)
   }
 
   // 8. usage and live streams reported to the app's dashboard

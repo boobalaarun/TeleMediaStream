@@ -81,6 +81,52 @@ try {
   tgf.closeAll()
   ok('Telegram slow-downs are reported: a 1 s FLOOD_WAIT is sat out, a 40 s one ends that request')
 
+  // 3c. A connection dies without telling anyone (no answer, no close): with requests waiting and
+  // nothing received for silentMs it is closed, and the part is asked again on a new connection.
+  // While Telegram answers no download at all, a part fails after 4 tries instead of hanging.
+  // one answer lost on a connection that stays alive (the silence check is off here, so this is
+  // the part timeout at work): that part alone is asked again
+  const tgl = new TelegramClient({
+    connect, storage, dcAddrs, rsaKeys, getAppConfig: async () => appCfg, log: (m) => logs.push(m), partTimeoutMs: 600,
+  })
+  await tgl.part(info12, 0, () => tgl.fileInfo(chat, 12))
+  world.lose = { count: 1 }
+  const tl = Date.now()
+  const [lost, other] = await Promise.all([
+    tgl.part(info12, 0, () => tgl.fileInfo(chat, 12)),
+    (async () => { await new Promise((r) => setTimeout(r, 50)); return tgl.part(info12, PART, () => tgl.fileInfo(chat, 12)) })(),
+  ])
+  const tookLost = Date.now() - tl
+  assert(B.equal(lost, fileBytes(12, 0, PART)) && B.equal(other, fileBytes(12, PART, 2 * PART)) && tookLost >= 600 && tookLost < 3000,
+    `a lost answer is asked again after the part timeout (${tookLost} ms)`)
+  assert(world.lose.count === 0 && tgl.connectionCounts()[5] >= 1, 'the connection was kept')
+  tgl.closeAll()
+
+  const silent = []
+  const tgs = new TelegramClient({
+    connect, storage, dcAddrs, rsaKeys, getAppConfig: async () => appCfg, log: (m) => logs.push(m),
+    silentMs: 400, onSilent: (s) => silent.push(s),
+  })
+  await tgs.part(info12, 0, () => tgs.fileInfo(chat, 12)) // a working connection to DC5 first
+  world.silent = { count: 1 }
+  const ts = Date.now()
+  const q = await tgs.part(info12, PART, () => tgs.fileInfo(chat, 12))
+  const tookS = Date.now() - ts
+  assert(B.equal(q, fileBytes(12, PART, 2 * PART)), 'the part arrived on a new connection')
+  assert(silent.length === 1 && silent[0].dc === 5 && tookS >= 400 && tookS < 3000, `replaced once after ${tookS} ms: ` + JSON.stringify(silent))
+  assert(logs.some((l) => /dc5: Telegram DC 5 sent nothing for \d+ s; closed that connection, asking again on a new one/.test(l)), 'logged')
+  world.mute = true
+  const tm = Date.now()
+  let em = null
+  try { await tgs.part(info12, 2 * PART, () => tgs.fileInfo(chat, 12)) } catch (e) { em = e }
+  const tookM = Date.now() - tm
+  assert(em && /sent nothing for/.test(em.message) && silent.length === 5 && tookM < 6000, `gave up after 4 silent connections in ${tookM} ms: ` + (em && em.message))
+  world.mute = false
+  const r2 = await tgs.part(info12, 2 * PART, () => tgs.fileInfo(chat, 12))
+  assert(B.equal(r2, fileBytes(12, 2 * PART, Math.min(3 * PART, world.files.get(12).size))), 'works again once Telegram answers')
+  tgs.closeAll()
+  ok(`a lost answer is asked again (${tookLost} ms); a silent connection is replaced (${tookS} ms); a Telegram that answers nothing fails in ${tookM} ms instead of hanging`)
+
   // 4. Telegram forgets the DC5 key -> transport -404 -> new key + re-import
   world.forgetKeysForDc(5)
   const p = await tg.part(info, 2 * PART, () => tg.fileInfo(chat, 11))

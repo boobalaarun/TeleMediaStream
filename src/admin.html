@@ -203,7 +203,13 @@ footer a{color:inherit}
 
   function streamRow(r, many) {
     const stalled = r.playing && r.idleSeconds >= 10
+    // what an idle stream is waiting for: Telegram (the Worker acts on it), or the TV to take data
+    // (paused, or its player stuck: the Worker leaves it alone)
+    const waitTg = r.playing && r.waitingFor === 'telegram' && r.waitingSeconds >= 5
+    const waitTv = r.playing && r.waitingFor === 'player' && r.waitingSeconds >= 10
     const state = !r.playing ? '<span>stopped</span>'
+      : waitTg ? '<span class="warn">waiting for Telegram for ' + r.waitingSeconds + ' s</span>'
+      : waitTv ? '<span class="warn">the TV hasn\'t taken data for ' + r.waitingSeconds + ' s (paused?)</span>'
       : stalled ? '<span class="warn">no data for ' + r.idleSeconds + ' s</span>'
       : '<span class="live-t">' + rate(r.speed) + '</span>'
     const bits = [state, esc(size(r.bytes)) + ' sent', esc(dur(r.seconds))]
@@ -272,7 +278,7 @@ footer a{color:inherit}
     // Today, in words: slow-downs, dropped links, Telegram vs player, Free-plan use (per bot when several)
     const many = st.clients.length > 1
     $('health').innerHTML = st.clients.filter((c) => Array.isArray(c.summary)).map((c) => c.summary.map((line) => {
-      const worry = /slowed the bot down (once|twice|\d+ times)|dropped the link|slower than the player/.test(line) ||
+      const worry = /slowed the bot down (once|twice|\d+ times)|went silent|stayed silent|dropped the link|slower than the player/.test(line) ||
         (c.health && (c.health.gbSecondsPct >= 75 || c.health.requestsPct >= 75) && /^Today so far/.test(line))
       return '<li' + (worry ? ' class="warn-l"' : '') + '>' + (many ? '<span class="who">' + esc(c.name === 'main' ? 'Your bot' : c.name) + '</span>' : '') +
         esc(line) + '</li>'

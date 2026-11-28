@@ -21,12 +21,31 @@ import { Health, healthLines, explainError, waitPct } from './health.js'
 const FILE_TTL_MS = 6 * 3600 * 1000
 const STREAM_IDLE_MS = 30000
 const HEALTH_SAVE_MS = 15000
+// A Telegram connection with requests waiting that receives nothing for this long is closed and the
+// requests asked again on a new one (a 1 MB part normally arrives in about a second).
+const TG_SILENT_MS = 10000
+// A stream that has waited this long for Telegram is ended on purpose: a player that sees its
+// connection break asks again from where it is, but one that just stops receiving may never do.
+const STALL_LIMIT_MS = 25000
+// Log once when the player hasn't taken data for this long (paused, or its player is stuck)
+const PLAYER_QUIET_LOG_MS = 60000
 
-// A stream's average speed and how much of its time went on waiting for Telegram (public: no names)
+const settingMs = (v, fallback) => (Number(v) > 0 ? Number(v) : fallback)
+
+// A stream's average speed, how much of its time went on waiting for Telegram, and what it is
+// waiting for right now (public: no names)
 const streamFigures = (s, now) => {
   const secs = Math.max(1, ((s.active > 0 ? now : s.last) - s.since) / 1000)
-  return { mbps: Math.round((s.bytes * 8) / secs / 1e5) / 10, telegramWaitPct: waitPct(s.telegramWaitMs || 0, s.playerWaitMs || 0) }
+  const waiting = s.active > 0 && s.waiting ? s.waiting : null
+  return {
+    mbps: Math.round((s.bytes * 8) / secs / 1e5) / 10,
+    telegramWaitPct: waitPct(s.telegramWaitMs || 0, s.playerWaitMs || 0),
+    waitingFor: waiting ? waiting.on : null,
+    waitingSeconds: waiting ? Math.round((now - waiting.since) / 1000) : 0,
+  }
 }
+
+class StallError extends Error {}
 
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' } })
@@ -52,6 +71,7 @@ export class TeleCore {
     this.health = new Health() // today's slow-downs, dropped links and Free-plan use (health.js)
     this.healthLoaded = null
     this.healthTimer = null
+    this.stallLimitMs = settingMs(env.STALL_LIMIT_MS, STALL_LIMIT_MS)
     this.tg = new TelegramClient({
       connect,
       storage: ctx.storage,
@@ -60,6 +80,12 @@ export class TeleCore {
       dhPrime: DH_PRIME_OVERRIDE,
       getAppConfig: () => this.appConfig(),
       log: (m) => console.log('[tg] ' + m),
+      silentMs: settingMs(env.TG_SILENT_MS, TG_SILENT_MS),
+      partTimeoutMs: settingMs(env.TG_PART_TIMEOUT_MS, 0) || undefined,
+      onSilent: () => {
+        this.health.silentConnection()
+        this.saveHealthSoon()
+      },
       onFlood: (f) => {
         this.health.slowdown(f)
         console.log(`[tg] Telegram asked the bot to wait ${f.seconds} s (${f.text}, DC ${f.dc})${f.waited ? '; waiting it out' : '; too long, this request stops'}`)
@@ -309,6 +335,47 @@ export class TeleCore {
     })
   }
 
+  // The next part of a stream. Waiting longer than the stall limit ends the stream on purpose
+  // (StallError): the player then sees its connection break and asks again from where it is,
+  // which Samsung's player behind Nuvio does, while a connection that just goes quiet freezes it.
+  waitForTelegram(p, stream) {
+    const since = Date.now()
+    stream.waiting = { on: 'telegram', since }
+    let timer
+    const limit = this.stallLimitMs
+    const late = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new StallError(
+        `Telegram sent nothing for this stream for ${Math.round(limit / 1000)} s; ended it so the player asks again`,
+      )), limit)
+    })
+    return Promise.race([p, late]).finally(() => {
+      clearTimeout(timer)
+      if (stream.waiting && stream.waiting.since === since) stream.waiting = null
+    })
+  }
+
+  // A write the player hasn't taken yet: nothing is done about it (a paused film looks the same),
+  // but a long one is logged once, and again when the player takes data, to tell a pause from a
+  // player that is stuck.
+  waitForPlayer(write, stream) {
+    const since = Date.now()
+    stream.waiting = { on: 'player', since }
+    let logged = false
+    const timer = setTimeout(() => {
+      logged = true
+      console.log(`[core] the player has not taken data for ${PLAYER_QUIET_LOG_MS / 1000} s (paused, or its player is stuck)`)
+    }, PLAYER_QUIET_LOG_MS)
+    const done = (took) => {
+      clearTimeout(timer)
+      if (logged) {
+        const secs = Math.round((Date.now() - since) / 1000)
+        console.log(took ? `[core] the player took data again after ${secs} s` : `[core] the player went away after ${secs} s without taking data`)
+      }
+      if (stream.waiting && stream.waiting.since === since) stream.waiting = null
+    }
+    return write.then((v) => { done(true); return v }, (e) => { done(false); throw e })
+  }
+
   async pump(chat, msg, info, start, last, writer, stream, token) {
     stream.active++
     this.health.enter()
@@ -330,7 +397,7 @@ export class TeleCore {
       while (pos <= last) {
         const { off, p } = queue.shift()
         const t0 = Date.now()
-        const data = await p
+        const data = await this.waitForTelegram(p, stream)
         const telegramMs = Date.now() - t0 // the part wasn't here yet: waiting for Telegram
         fill()
         const from = pos - off
@@ -339,7 +406,7 @@ export class TeleCore {
         const piece = data.subarray(from, to)
         const t1 = Date.now()
         try {
-          await writer.write(piece)
+          await this.waitForPlayer(writer.write(piece), stream)
         } catch {
           clientGone = true // player closed the connection or seeked: not an error
           break
@@ -361,9 +428,14 @@ export class TeleCore {
       const m = String(e && e.message ? e.message : e)
       this.lastError = m.slice(0, 300)
       console.log('[core] stream error: ' + m)
+      if (e instanceof StallError) {
+        this.health.stalled()
+        this.saveHealthSoon()
+      }
       try { await writer.abort(e) } catch {}
     } finally {
       stream.active--
+      if (!stream.active) stream.waiting = null
       stream.last = Date.now()
       this.health.leave()
       this.saveHealthSoon()

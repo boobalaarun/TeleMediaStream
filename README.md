@@ -93,6 +93,7 @@ All in Cloudflare → your Worker → Settings → Variables and Secrets. Nothin
 | `USER_SECRET_<NAME>` | no | **A** only: one per user you host on your Worker (see [Your users](#your-users)). |
 | `SEGMENT_MB` | no | MB per Durable Object request. Default 512. Set `1` if the self-test fails. |
 | `LOCATION_HINT` | no | Where the Durable Object is first created: `apac` (default), `weur`, `eeur`, `enam`, `wnam`, `sam`, `oc`, `afr`, `me`. Set it before the first play; it doesn't move an existing object. |
+| `TG_SILENT_MS`, `TG_PART_TIMEOUT_MS`, `STALL_LIMIT_MS` | no | Rarely needed. How long a Telegram connection with requests waiting may stay silent before it is replaced (10000), how long one 1 MB part may take before it is asked for again (15000), and how long a stream may wait for Telegram before it is ended so the player asks again (25000). |
 
 ## Dashboard
 
@@ -100,10 +101,14 @@ Open your Worker's address in a browser (it goes to `/admin`) and sign in with a
 
 - **What's playing:** each stream's file name, speed, data sent, playing time and data centre, with
   a warning when one stops getting data, and how much of the time it waited for Telegram (above 50%,
-  Telegram is slower than the player: the cause of buffering).
+  Telegram is slower than the player: the cause of buffering). A stalled stream says which side it is
+  waiting for: **waiting for Telegram for N s** (the Worker deals with it) or **the TV hasn't taken
+  data for N s** (paused, or the TV's player is stuck: the Worker leaves it alone).
 - **Today, in words:** how often Telegram slowed the bot down (and the longest wait), how often a
-  dropped link to the Durable Object was ridden out between segments, whether Telegram kept up with
-  the player, and how long the Durable Object was busy against the daily Free allowance.
+  Telegram connection went silent and was replaced, how often Telegram stayed silent long enough
+  that a stream was ended for the player to ask again, how often a dropped link to the Durable
+  Object was ridden out between segments, whether Telegram kept up with the player, and how long
+  the Durable Object was busy against the daily Free allowance.
 - **Sent today (UTC)**, with a bar for each of the last 24 hours. Cloudflare's daily Free allowance
   resets at 00:00 UTC.
 - **Telegram bots:** your bot and each user you host, with its state (playing, asleep, not logged in
@@ -160,6 +165,8 @@ They contain no secrets, file names or viewer IPs, but they are public: use plai
 | "Telegram rejected the bot login" | check BOT_TOKEN / API_ID / API_HASH in the app |
 | Self-test fails, or error 1102 | add `SEGMENT_MB` = `1`, then Deploy |
 | A stream shows "no data for … s" (or a climbing `idleSeconds` in `/status`) | it is stuck: close the player and play again. A low speed that keeps going means a far data centre |
+| Playback stops and only restarting the TV app helps | Look at the stream on the dashboard while it is stuck. **Waiting for Telegram**: since 2.3.0 the Worker replaces a silent Telegram connection after 10 s and, if Telegram still sends nothing, ends the stream after 25 s so the player reconnects by itself (Nuvio TV on Samsung does, after a broken connection, not after a silent one). **The TV hasn't taken data**: the TV's own player is stuck; Workers Logs show `[core] the player has not taken data for 60 s`, and the fix is in the TV app |
+| **Today** says a Telegram connection went silent, or Telegram stayed silent for a whole stream | the first is handled without the player noticing; the second ended a stream so the player asks again (a short buffering). Often: note the times and check whether the TV and the Durable Object are far apart (`LOCATION_HINT`) or Telegram had an outage |
 | Buffering, and "waiting for Telegram" is above 50% | Telegram sends this file slower than the player plays it (often a far data centre, or slow-downs: see **Today**). The Worker can't make Telegram faster; a lower-bitrate copy of the file can help |
 | **Today** says Cloudflare dropped the link to the Durable Object | a short Cloudflare hiccup between two segments: the stream carried on from the same byte. A drop in the middle of a segment ends the stream instead and the player asks again (Workers Logs: `[front] stream ended at an unknown byte`); if that happens often, note the times and check Cloudflare's status page |
 | **Today** says Telegram slowed the bot down | Telegram rations each bot. Waits up to 15 s are sat out; a longer one stops that stream and the player asks again. Several viewers on one bot make it more likely |
@@ -190,11 +197,15 @@ almost no CPU (2.2.0 counted bytes in JavaScript to resume after dropped links, 
 of the Free plan's CPU). If Cloudflare drops the link to the Durable Object ("Network connection lost")
 just as the next segment is asked for, that request is tried again, up to 5 times. In the middle of a
 segment nobody knows how many bytes got through, so the response ends and the player asks again.
+A stream must never go silent: some TV players (Samsung's, in Nuvio TV) recover from a broken
+connection but freeze on one that just stops sending. So a Telegram connection that receives nothing
+for 10 s while requests wait is closed and the requests asked again on a new one, a part unanswered
+for 15 s is asked again, and a stream that has waited 25 s for Telegram is ended on purpose.
 
 ## Tests
 
 `npm ci`, then `npm test` (unit, the stream relay and health counters, and the Telegram client
-against a fake multi-data-centre Telegram) and
+against a fake multi-data-centre Telegram, including connections that go silent and lost answers) and
 `npm run test:e2e` (the real Worker and Durable Objects in workerd with a fake app). Both check links
 and signatures with the app's own Python code, so they need Python 3 and the app's source: set
 `APP_SRC` to that folder. `node test/crosscheck.mjs` also compares the encryption with pyrofork

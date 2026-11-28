@@ -196,6 +196,14 @@ const noSleep = async () => {}
   now = Date.parse('2026-11-30T00:01:00Z'); h3.leave()
   assert(h3.snapshot().activeMs === 60000, 'midnight split: ' + h3.snapshot().activeMs)
   assert(waitPct(0, 0) === null && /wait 40 s/.test(explainError('420 FLOOD_WAIT_40')) && /player has to ask for the stream again/.test(explainError('Network connection lost.')), 'explain')
+  // silent Telegram connections (replaced) and streams ended because Telegram stayed silent
+  const h4 = new Health(() => now)
+  h4.silentConnection(); h4.silentConnection(); h4.stalled()
+  const l4 = healthLines(h4.snapshot())
+  assert(l4.includes('A Telegram connection went silent twice today; the Worker closed it and asked again on a new one.'), JSON.stringify(l4))
+  assert(l4.some((l) => /^Telegram stayed silent for a whole stream once today \(last at 00:01 UTC\), so the Worker ended that stream for the player to ask again\.$/.test(l)), JSON.stringify(l4))
+  assert(/stopped answering for that stream/.test(explainError('Telegram sent nothing for this stream for 25 s; ended it so the player asks again')) &&
+    /connection went silent/.test(explainError('Telegram DC 4 sent nothing for 10 s')), 'explain silence')
   ok('health counters: slow-downs, dropped links, Telegram vs player, Free-plan share, restarts and midnight, in words')
 }
 
